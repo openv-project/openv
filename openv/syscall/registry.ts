@@ -3,9 +3,9 @@ import { type SystemComponent } from "./index.ts";
 export type RegistryValue = string | number | boolean | ArrayBuffer;
 
 export const REGISTRY_READ_NAMESPACE = "party.openv.registry.read" as const;
-export const REGISTRY_READ_NAMESPACE_VERSIONED = "party.openv.registry.read/0.1.0" as const;
+export const REGISTRY_READ_NAMESPACE_VERSIONED = `${REGISTRY_READ_NAMESPACE}/0.1.0` as const;
 export const REGISTRY_WRITE_NAMESPACE = "party.openv.registry.write" as const;
-export const REGISTRY_WRITE_NAMESPACE_VERSIONED = "party.openv.registry.write/0.1.0" as const;
+export const REGISTRY_WRITE_NAMESPACE_VERSIONED = `${REGISTRY_WRITE_NAMESPACE}/0.1.0` as const;
 
 /**
  * The universal registry read system component.
