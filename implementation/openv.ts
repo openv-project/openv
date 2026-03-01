@@ -1,13 +1,8 @@
 import type { API } from "../openv/api/api.ts";
 import type { FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemVirtualComponent, RegistryReadComponent, RegistryWriteComponent, SystemComponent } from "../openv/syscall/index.ts";
 import type { OpEnv, OpEnvSystem } from "../openv/openv.ts";
-import FsApi from "../openv/api/party/openv/fs/fs.ts";
 import { CoreRegistry } from "./syscall/registry.ts";
-import { TmpFs } from "./fs/tmpfs.ts";
 import { CoreFS } from "./syscall/fs.ts";
-import RegistryApi from "../openv/api/party/openv/registry/registry.ts";
-
-
 
 export class CoreOpEnv implements OpEnv<RegistryReadComponent & RegistryWriteComponent>, OpEnvSystem {
     #api: { [key: string]: API } = {};
@@ -22,8 +17,8 @@ export class CoreOpEnv implements OpEnv<RegistryReadComponent & RegistryWriteCom
     }
 
     getAPI<T extends API>(name: T["name"]): T | null;
-    getAPI<T extends API>(name: string): T | null {
-        return this.#api[name] as T | null;
+    getAPI(name: string): API | null {
+        return this.#api[name];
     }
 
     #components: SystemComponent<any, any>[] = [];

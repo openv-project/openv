@@ -31,7 +31,7 @@ export interface OpEnv<T extends SystemComponent<any, any>> {
     installAPI(api: API): Promise<void>;
     
     getAPI<T extends API>(name: T["name"]): T | null;
-    getAPI<T extends API>(name: string): T | null;
+    getAPI(name: string): API | null;
 }
 
 /**
