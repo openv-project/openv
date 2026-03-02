@@ -5,7 +5,7 @@ import { CoreRegistry } from "./syscall/registry.ts";
 import { CoreFS } from "./syscall/fs.ts";
 import { createPairTransport } from "./systemlink/transport/pair.ts";
 import { CoreSystemLinkPeer } from "./systemlink/peer.ts";
-import type { PlainParameter } from "../openv/systemlink/wire.ts";
+import type { PlainParameter, SystemLinkTransport } from "../openv/systemlink/wire.ts";
 
 export class CoreOpEnv implements OpEnv<RegistryReadComponent & RegistryWriteComponent>, OpEnvSystem {
     #api: { [key: string]: API } = {};
@@ -103,3 +103,69 @@ export class CoreOpEnv implements OpEnv<RegistryReadComponent & RegistryWriteCom
         this.installSystemComponent(new CoreFS());
     }
 }
+
+export class ClientOpEnv<T extends SystemComponent<any, any>> implements OpEnv<T> {
+    #api: { [key: string]: API } = {};
+    #peer: CoreSystemLinkPeer;
+    
+    constructor(transport?: SystemLinkTransport) {
+        this.#peer = new CoreSystemLinkPeer();
+        if (transport) this.#peer.setTransport(transport);
+        this.#peer.start();
+    }
+
+    #peerProxy: T = new Proxy({} as T, {
+        get: (_t, prop, _r) => {
+            return (...args: PlainParameter[]) => {
+                return this.#peer.callRemote(prop.toString(), args);
+            }
+        }
+    });
+
+    get system(): T {
+        return this.#peerProxy;
+    }
+    getAPI<T extends API>(name: T["name"]): T | null;
+    getAPI(name: string): API | null {
+        return this.#api[name] || null;
+    }
+
+    async setTransport(transport: SystemLinkTransport): Promise<void> {
+        await this.#peer.stop();
+        this.#peer.setTransport(transport);
+        await this.#peer.start();
+    }
+
+    get api(): { readonly [key: string]: API; } {
+        return this.#api;
+    }
+
+    async installAPI(api: API): Promise<void> {
+        this.#api[api.name] = api;
+        await api.initialize(this);
+    }
+}
+
+const systemOpenv = new CoreOpEnv();
+
+const systemPeer = new CoreSystemLinkPeer();
+
+for (const [name, method] of Object.entries(systemOpenv.system)) {
+    if (typeof method === "function") {
+        console.log(`System method: ${name}`);
+        systemPeer.storeFunction(name, method.bind(systemOpenv.system));
+    }
+
+}
+
+const [transportA, transportB] = createPairTransport();
+
+systemPeer.setTransport(transportA);
+systemPeer.start();
+
+const clientEnv = new ClientOpEnv(transportB);
+    
+// console.log("Client system supports registry read:", await clientEnv.system.supports("party.openv.registry.read"));
+clientEnv.system.supports("party.openv.registry.read").then(result => {
+    console.log("Client system supports registry read:", result);
+});
