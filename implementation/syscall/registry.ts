@@ -155,7 +155,7 @@ export class CoreRegistry implements RegistryReadComponent, RegistryWriteCompone
     }
 
     ["party.openv.registry.read.watchDefault"](key: string): Promise<{ changes: AsyncIterable<RegistryValue | null>; abort: () => Promise<void>; }> {
-        return this["party.openv.registry.watchEntry"](key, "");
+        return this["party.openv.registry.read.watchEntry"](key, "");
     }
 
     ["party.openv.registry.write.writeEntry"](key: string, entry: string, value: RegistryValue): Promise<void> {
@@ -193,7 +193,7 @@ export class CoreRegistry implements RegistryReadComponent, RegistryWriteCompone
     }
 
     async ["party.openv.impl.registry.preWatchDefault"](key: string, handler: (value: RegistryValue | null) => Promise<void>): Promise<void> {
-        return this["party.openv.registry.impl.preWatchEntry"](key, "", handler);
+        return this["party.openv.impl.registry.preWatchEntry"](key, "", handler);
     }
 
     supports(ns: "party.openv.registry.read" | "party.openv.registry.read/0.1.0"): Promise<"party.openv.registry.read/0.1.0">;
