@@ -3,6 +3,9 @@ import type { FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemRe
 import type { OpEnv, OpEnvSystem } from "../openv/openv.ts";
 import { CoreRegistry } from "./syscall/registry.ts";
 import { CoreFS } from "./syscall/fs.ts";
+import { createPairTransport } from "./systemlink/transport/pair.ts";
+import { CoreSystemLinkPeer } from "./systemlink/peer.ts";
+import type { PlainParameter } from "../openv/systemlink/wire.ts";
 
 export class CoreOpEnv implements OpEnv<RegistryReadComponent & RegistryWriteComponent>, OpEnvSystem {
     #api: { [key: string]: API } = {};
@@ -46,6 +49,43 @@ export class CoreOpEnv implements OpEnv<RegistryReadComponent & RegistryWriteCom
                     }
                 }
             }
+
+            return undefined;
+        },
+        ownKeys: (_t) => {
+            const names = new Set<string>();
+            for (const c of this.#components) {
+                const proto = c.constructor.prototype;
+                if (proto && typeof proto === "object") {
+                    const props = Object.getOwnPropertyNames(proto);
+                    for (const p of props) names.add(p);
+                }
+            }
+            return [...names].filter(name => name !== "constructor");
+        },
+        has: (_t, prop) => {
+            for (const component of this.#components) {
+                if (prop in component) {
+                    return true;
+                }
+            }
+            return false;
+        },
+
+        // Add this trap so reflection APIs see enumerable own properties
+        getOwnPropertyDescriptor: (_t, prop) => {
+            for (const component of this.#components) {
+                if (prop in component) {
+                    const val = (component as any)[prop];
+                    const isFn = typeof val === "function";
+                    return {
+                        configurable: true,
+                        enumerable: true,
+                        writable: !isFn,
+                        value: isFn ? val.bind(component) : val
+                    } as PropertyDescriptor;
+                }
+            }
             return undefined;
         }
     });
@@ -56,15 +96,6 @@ export class CoreOpEnv implements OpEnv<RegistryReadComponent & RegistryWriteCom
 
     installSystemComponent<T extends SystemComponent<any, any>>(sys: T): void {
         this.#components.push(sys);
-    }
-
-    getSystemComponent<T extends SystemComponent<any, any>>(namespace: string): T | null {
-        for (const component of this.#components) {
-            if ((component as any).namespace === namespace) {
-                return component as T;
-            }
-        }
-        return null;
     }
 
     constructor() {

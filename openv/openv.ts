@@ -36,7 +36,7 @@ export interface OpEnv<T extends SystemComponent<any, any>> {
 
 /**
  * These methods can be implemented by the operating system as an example of how to organize an implementation of
- * OpEnv. The `installSystemComponent` and `getSystemComponent` methods mirror the `installAPI` and `getAPI` methods on the standard OpEnv
+ * OpEnv. The `installSystemComponent` method mirrors the `installAPI` method on the standard OpEnv
  * interface respectively, but are used for syscalls instead of APIs. Instead of trying to design a huge class
  * with all the supported system components, we can design each component's implementation as a separate class,
  * and install them into the system as components. The system getter can simply return a proxy that traps gets to
@@ -44,5 +44,4 @@ export interface OpEnv<T extends SystemComponent<any, any>> {
  */
 export interface OpEnvSystem {
     installSystemComponent<T extends SystemComponent<any, any>>(sys: T): void;
-    getSystemComponent<T extends SystemComponent<any, any>>(namespace: string): T | null;
 }

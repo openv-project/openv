@@ -404,14 +404,6 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     }
 
     /**
-     * Returns the VFS table entry for a given id, if it exists.
-     * Useful for other components that need to dispatch operations to a virtual filesystem.
-     */
-    getVfsProvider(id: string): Partial<VFS> | undefined {
-        return this.#vfsTable.get(id);
-    }
-
-    /**
      * Resolve a regular filesystem path against the mount table.
      * Finds the longest matching mountpoint prefix and returns the provider id and subpath.
      * Returns null if no mountpoint matches.
