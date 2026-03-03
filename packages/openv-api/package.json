@@ -1,0 +1,11 @@
+{
+    "name": "@openv-project/openv-api",
+    "version": "0.1.0",
+    "description": "The OpEnv API package contains exclusively type definitions, documentation, and constants for OpEnv implementations.",
+    "main": "mod.ts",
+    "types": "mod.ts",
+    "scripts": {
+        "build": "tsc -p tsconfig.json"
+    },
+    "license": "MIT"
+}

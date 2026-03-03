@@ -1,0 +1,14 @@
+{
+    "name": "@openv-project/openv-core",
+    "version": "0.1.0",
+    "description": "The OpEnv Core package contains implementations of the OpEnv API that can be reused to build an OpEnv implementation more easily.",
+    "main": "mod.ts",
+    "types": "mod.ts",
+    "scripts": {
+        "build": "tsc -p tsconfig.json"
+    },
+    "license": "MIT",
+    "dependencies": {
+        "@openv-project/openv-api": "^0.1.0"
+    }
+}
