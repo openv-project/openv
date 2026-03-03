@@ -28,7 +28,7 @@ export interface FileSystemEvent {
  * The core file system component that provides the open/close interface.
  */
 export interface FileSystemCoreComponent extends SystemComponent<"party.openv.filesystem/0.1.0", "party.openv.filesystem"> {
-    ["party.openv.filesystem.open"](path: string, flags: OpenFlags, mode: FileMode): Promise<number>;
+    ["party.openv.filesystem.open"](path: string, flags: OpenFlags, mode?: FileMode): Promise<number>;
     ["party.openv.filesystem.close"](fd: number): Promise<void>;
 }
 

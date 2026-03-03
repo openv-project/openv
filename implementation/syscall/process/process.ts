@@ -1,5 +1,5 @@
-import type { SystemComponent } from "../../openv/syscall";
-import { PROCESS_LOCAL_NAMESPACE, PROCESS_LOCAL_NAMESPACE_VERSIONED, PROCESS_NAMESPACE, PROCESS_NAMESPACE_VERSIONED, PROCESS_SIGNAL_NOTIFYEXIT, type ProcessComponent, type ProcessLocalComponent } from "../../openv/syscall/process";
+import type { FileSystemCoreComponent, FileSystemReadOnlyComponent, SystemComponent } from "../../../openv/syscall";
+import { PROCESS_LOCAL_NAMESPACE, PROCESS_LOCAL_NAMESPACE_VERSIONED, PROCESS_NAMESPACE, PROCESS_NAMESPACE_VERSIONED, PROCESS_SIGNAL_NOTIFYEXIT, type ProcessComponent, type ProcessLocalComponent } from "../../../openv/syscall/process";
 
 type SignalHandler = (cx: { signal: string; uid: number; gid: number; pid: number }) => Promise<void>;
 
@@ -30,7 +30,8 @@ export interface ProcessSpawnContext {
 }
 
 export interface ProcessExecutor {
-    run(ctx: ProcessSpawnContext, process: ProcessComponent & CoreProcessExt): Promise<number | null>;
+    run(ctx: ProcessSpawnContext): Promise<void>;
+    destroy(pid: number): Promise<void>;
 }
 
 const CORE_PROCESS_EXT_NAMESPACE = "party.openv.impl.process" as const;
@@ -48,7 +49,6 @@ export interface CoreProcessExt extends SystemComponent<typeof CORE_PROCESS_EXT_
 
 
 export class CoreProcess implements ProcessComponent, CoreProcessExt {
-
     #pidCounter = 0;
     #processTable: Map<number, ProcessEntry> = new Map();
     #executor: ProcessExecutor | null = null;
@@ -69,6 +69,29 @@ export class CoreProcess implements ProcessComponent, CoreProcessExt {
     }
 
     async ["party.openv.impl.process.deliverSignal"](senderPid: number, targetPid: number, signal: string): Promise<void> {
+        if (targetPid === 0) {
+            // PID 0 is the target for signals that affect the system's process management
+            if (signal === PROCESS_SIGNAL_NOTIFYEXIT) {
+                // Fully destroy the sender process and free the pid
+                const entry = this.#processTable.get(senderPid);
+                if (entry) {
+                    entry.running = false;
+                    for (const resolve of entry.waiters) {
+                        resolve(entry.exitCode);
+                    }
+                    entry.waiters = [];
+                    this.#processTable.delete(senderPid);
+                    // Allow the executor to perform cleanup
+                    if (this.#executor) {
+                        await this.#executor.destroy(senderPid).catch(() => {
+                            // ignore executor cleanup errors
+                        });
+                    }
+                }
+            }
+            return;
+        }
+
         const entry = this.#getEntry(targetPid);
         if (!entry.running) {
             throw new Error(`Process ${targetPid} is not running.`);
@@ -145,10 +168,9 @@ export class CoreProcess implements ProcessComponent, CoreProcessExt {
         const entry = this.#getEntry(pid);
         const ctx: ProcessSpawnContext = { ...entry, env: { ...entry.env } };
 
-        this.#executor.run(ctx, this).then(
-            (code) => this["party.openv.impl.process.exitProcess"](pid, code),
-            () => this["party.openv.impl.process.exitProcess"](pid, null),
-        );
+        this.#executor.run(ctx).catch(() => {
+            this["party.openv.impl.process.exitProcess"](pid, null);
+        });
 
         return pid;
     }
@@ -321,9 +343,14 @@ export class ProcessScopedProcess implements ProcessComponent, ProcessLocalCompo
 
         if (self.ppid !== 0) {
             await this.#process["party.openv.impl.process.deliverSignal"](this.#pid, self.ppid, PROCESS_SIGNAL_NOTIFYEXIT).catch(() => {
-                // ignore
+                // RIP parent :(
             });
         }
+
+        await this.#process["party.openv.impl.process.deliverSignal"](this.#pid, 0, PROCESS_SIGNAL_NOTIFYEXIT).catch(() => {
+            // This is probably fine um
+            console.warn('this is fine 🔥🔥');
+        });
     }
 
     async ["party.openv.process.local.getpid"](): Promise<number> {

@@ -97,11 +97,6 @@ export class CoreOpEnv implements OpEnv<RegistryReadComponent & RegistryWriteCom
     installSystemComponent<T extends SystemComponent<any, any>>(sys: T): void {
         this.#components.push(sys);
     }
-
-    constructor() {
-        this.installSystemComponent(new CoreRegistry());
-        this.installSystemComponent(new CoreFS());
-    }
 }
 
 export class ClientOpEnv<T extends SystemComponent<any, any>> implements OpEnv<T> {
@@ -145,27 +140,3 @@ export class ClientOpEnv<T extends SystemComponent<any, any>> implements OpEnv<T
         await api.initialize(this);
     }
 }
-
-const systemOpenv = new CoreOpEnv();
-
-const systemPeer = new CoreSystemLinkPeer();
-
-for (const [name, method] of Object.entries(systemOpenv.system)) {
-    if (typeof method === "function") {
-        console.log(`System method: ${name}`);
-        systemPeer.storeFunction(name, method.bind(systemOpenv.system));
-    }
-
-}
-
-const [transportA, transportB] = createPairTransport();
-
-systemPeer.setTransport(transportA);
-systemPeer.start();
-
-const clientEnv = new ClientOpEnv(transportB);
-    
-// console.log("Client system supports registry read:", await clientEnv.system.supports("party.openv.registry.read"));
-clientEnv.system.supports("party.openv.registry.read").then(result => {
-    console.log("Client system supports registry read:", result);
-});
