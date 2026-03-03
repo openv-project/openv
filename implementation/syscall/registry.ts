@@ -1,5 +1,6 @@
 import type { SystemComponent } from "../../openv/syscall/index.ts";
 import type { RegistryReadComponent, RegistryValue, RegistryWriteComponent } from "../../openv/syscall/registry";
+import { REGISTRY_READ_NAMESPACE, REGISTRY_READ_NAMESPACE_VERSIONED, REGISTRY_WRITE_NAMESPACE, REGISTRY_WRITE_NAMESPACE_VERSIONED } from "../../openv/syscall/registry.ts";
 
 /**
  * Local extension to the registry component.
@@ -7,7 +8,10 @@ import type { RegistryReadComponent, RegistryValue, RegistryWriteComponent } fro
  * For example, a watcher that writes registry changes to disk would be able to guarantee that the change is fully 
  * flushed to disk before the promise of the registry change is resolved.
  */
-interface CoreRegistryExt extends SystemComponent<"party.openv.impl.registry/0.1.0", "party.openv.impl.registry"> {
+const CORE_REGISTRY_EXT_NAMESPACE = "party.openv.impl.registry" as const;
+const CORE_REGISTRY_EXT_NAMESPACE_VERSIONED = `${CORE_REGISTRY_EXT_NAMESPACE}/0.1.0` as const;
+
+interface CoreRegistryExt extends SystemComponent<typeof CORE_REGISTRY_EXT_NAMESPACE_VERSIONED, typeof CORE_REGISTRY_EXT_NAMESPACE> {
     ["party.openv.impl.registry.preWatchEntry"](key: string, entry: string, handler: (value: RegistryValue | null) => Promise<void>): Promise<void>;
     ["party.openv.impl.registry.preWatchDefault"](key: string, handler: (value: RegistryValue | null) => Promise<void>): Promise<void>;
 }
@@ -196,22 +200,22 @@ export class CoreRegistry implements RegistryReadComponent, RegistryWriteCompone
         return this["party.openv.impl.registry.preWatchEntry"](key, "", handler);
     }
 
-    supports(ns: "party.openv.registry.read" | "party.openv.registry.read/0.1.0"): Promise<"party.openv.registry.read/0.1.0">;
-    supports(ns: "party.openv.registry.write" | "party.openv.registry.write/0.1.0"): Promise<"party.openv.registry.write/0.1.0">;
-    supports(ns: "party.openv.impl.registry" | "party.openv.impl.registry/0.1.0"): Promise<"party.openv.impl.registry/0.1.0">;
-    supports(ns: string): Promise<string | null> {
+    async supports(ns: typeof REGISTRY_READ_NAMESPACE | typeof REGISTRY_READ_NAMESPACE_VERSIONED): Promise<typeof REGISTRY_READ_NAMESPACE_VERSIONED>;
+    async supports(ns: typeof REGISTRY_WRITE_NAMESPACE | typeof REGISTRY_WRITE_NAMESPACE_VERSIONED): Promise<typeof REGISTRY_WRITE_NAMESPACE_VERSIONED>;
+    async supports(ns: typeof CORE_REGISTRY_EXT_NAMESPACE_VERSIONED | typeof CORE_REGISTRY_EXT_NAMESPACE): Promise<typeof CORE_REGISTRY_EXT_NAMESPACE_VERSIONED>;
+    async supports(ns: string): Promise<string | null> {
         switch (ns) {
-            case "party.openv.registry.read":
-            case "party.openv.registry.read/0.1.0":
-                return Promise.resolve("party.openv.registry.read/0.1.0");
-            case "party.openv.registry.write":
-            case "party.openv.registry.write/0.1.0":
-                return Promise.resolve("party.openv.registry.write/0.1.0");
-            case "party.openv.impl.registry":
-            case "party.openv.impl.registry/0.1.0":
-                return Promise.resolve("party.openv.impl.registry/0.1.0");
+            case REGISTRY_READ_NAMESPACE:
+            case REGISTRY_READ_NAMESPACE_VERSIONED:
+                return REGISTRY_READ_NAMESPACE_VERSIONED;
+            case REGISTRY_WRITE_NAMESPACE:
+            case REGISTRY_WRITE_NAMESPACE_VERSIONED:
+                return REGISTRY_WRITE_NAMESPACE_VERSIONED;
+            case CORE_REGISTRY_EXT_NAMESPACE:
+            case CORE_REGISTRY_EXT_NAMESPACE_VERSIONED:
+                return CORE_REGISTRY_EXT_NAMESPACE_VERSIONED;
             default:
-                return Promise.resolve(null);
+                return null;
         }
     }
 }

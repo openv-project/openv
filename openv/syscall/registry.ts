@@ -1,4 +1,4 @@
-import { type SystemComponent } from "./index.ts";
+import type { SystemComponent } from "./index.ts";
 
 export type RegistryValue = string | number | boolean | ArrayBuffer;
 

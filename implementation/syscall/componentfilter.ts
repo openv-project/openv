@@ -1,4 +1,4 @@
-import { SystemComponent } from "../../openv/syscall";
+import type { SystemComponent } from "../../openv/syscall";
 
 export type DenyPolicy = {
     type: "deny";

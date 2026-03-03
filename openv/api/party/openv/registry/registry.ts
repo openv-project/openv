@@ -1,4 +1,5 @@
-import { type RegistryReadComponent, type RegistryWriteComponent, type RegistryValue, REGISTRY_READ_NAMESPACE, REGISTRY_WRITE_NAMESPACE } from "../../../../syscall/index.ts";
+import type { RegistryReadComponent, RegistryWriteComponent, RegistryValue } from "../../../../syscall/index.ts";
+import { REGISTRY_READ_NAMESPACE, REGISTRY_WRITE_NAMESPACE } from "../../../../syscall/index.ts";
 import type { OpEnv } from "../../../../openv.ts";
 import type { API } from "../../../api.ts";
 

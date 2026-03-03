@@ -1,12 +1,9 @@
-import { SystemComponent } from ".";
+import type { SystemComponent } from "./index.ts";
 
-export const DOM_NAMESPACE = "party.openv.dom";
-export const DOM_NAMESPACE_VERSIONED = `${DOM_NAMESPACE}/0.1.0`;
+export const DOM_NAMESPACE = "party.openv.dom" as const;
+export const DOM_NAMESPACE_VERSIONED = `${DOM_NAMESPACE}/0.1.0` as const;
 
-export interface DOMComponent extends SystemComponent<
-  typeof DOM_NAMESPACE_VERSIONED,
-  typeof DOM_NAMESPACE
-> {
+export interface DOMComponent extends SystemComponent<typeof DOM_NAMESPACE_VERSIONED, typeof DOM_NAMESPACE> {
 
   ["party.openv.dom.listRoots"](): Promise<string[]>;
 

@@ -1,8 +1,6 @@
-import { OpEnv } from "../../../openv/openv";
-import { FileSystemCoreComponent, FileSystemReadOnlyComponent, SystemComponent } from "../../../openv/syscall";
-import { ProcessComponent } from "../../../openv/syscall/process";
+import type { FileSystemCoreComponent, FileSystemReadOnlyComponent, SystemComponent } from "../../../openv/syscall";
 import { createPostMessageTransport } from "../../systemlink/transport/postmessage";
-import { CoreProcessExt, ProcessExecutor, ProcessSpawnContext } from "./process";
+import { ProcessExecutor, ProcessSpawnContext } from "./process";
 
 export type EnvironmentBuilder<T extends FileSystemCoreComponent & FileSystemReadOnlyComponent, U extends FileSystemCoreComponent & FileSystemReadOnlyComponent> = (sys: T, ctx: ProcessSpawnContext) => Promise<U>;
 

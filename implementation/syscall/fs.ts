@@ -1,13 +1,15 @@
-import type { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemVirtualComponent, FsStats, OpenFlags } from "../../openv/syscall/fs.ts";
+import type { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemVirtualComponent, FsStats, OpenFlags } from "../../openv/syscall/fs.ts";
+import { FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED } from "../../openv/syscall/fs.ts";
+import type { SystemComponent } from "../../openv/syscall/index.ts";
 
 type VFS = {
     mount: (path: string) => Promise<void>;
     unmount: (path: string) => Promise<void>;
-    open: (path: string, fd: number, flags: OpenFlags, mode: FileMode) => Promise<void>;
+    open: (path: string, ofd: number, flags: OpenFlags, mode: FileMode) => Promise<void>;
     create: (path: string, mode?: FileMode) => Promise<void>;
-    close: (fd: number) => Promise<void>;
-    read: (fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number) => Promise<number>;
-    write: (fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null) => Promise<number>;
+    close: (ofd: number) => Promise<void>;
+    read: (ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number) => Promise<number>;
+    write: (ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null) => Promise<number>;
     stat: (path: string) => Promise<FsStats>;
     readdir: (path: string) => Promise<string[]>;
     mkdir: (path: string, mode?: FileMode) => Promise<void>;
@@ -20,7 +22,35 @@ type VFS = {
     }>;
 };
 
-export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent {
+const CORE_FS_EXT_NAMESPACE = "party.openv.impl.filesystem" as const;
+const CORE_FS_EXT_NAMESPACE_VERSIONED = "party.openv.impl.filesystem/0.1.0" as const;
+
+/**
+ * Internal extensions for linking with ProcessScopedFS
+ */
+export interface CoreFSExt extends SystemComponent<typeof CORE_FS_EXT_NAMESPACE_VERSIONED, typeof CORE_FS_EXT_NAMESPACE> {
+    /**
+     * Read from a file using OFD.
+     */
+    ["party.openv.impl.filesystem.readByOfd"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number): Promise<number>;
+
+    /**
+     * Write to a file using OFD.
+     */
+    ["party.openv.impl.filesystem.writeByOfd"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<number>;
+
+    /**
+     * Close a file using OFD.
+     */
+    ["party.openv.impl.filesystem.closeByOfd"](ofd: number): Promise<void>;
+
+    /**
+     * Check if an OFD is valid and has an associated provider.
+     */
+    ["party.openv.impl.filesystem.hasOfd"](ofd: number): Promise<boolean>;
+}
+
+export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, CoreFSExt {
     async ["party.openv.filesystem.write.create"](path: string, mode?: FileMode): Promise<void> {
         const resolved = this.#resolveMountPath(path);
         if (!resolved) {
@@ -40,15 +70,15 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         }
         provider.create = handler;
     }
-    async ["party.openv.filesystem.write.write"](fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<number> {
-        const entry = this.#fdTable.get(fd);
+    async ["party.openv.filesystem.write.write"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<number> {
+        const entry = this.#ofdTable.get(ofd);
         if (!entry) {
-            throw new Error(`Invalid file descriptor ${fd}`);
+            throw new Error(`Invalid open file number ${ofd}`);
         }
         if (!entry.provider || typeof entry.provider.write !== "function") {
-            throw new Error(`File descriptor ${fd} is not backed by a provider that supports write.`);
+            throw new Error(`Open file number ${ofd} is not backed by a provider that supports write.`);
         }
-        return entry.provider.write(fd, buffer, offset, length, position);
+        return entry.provider.write(ofd, buffer, offset, length, position);
     }
 
     // Map of mountpoint -> vfs id
@@ -64,12 +94,10 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
 
         const provider = this.#vfsTable.get(id);
         if (!provider) {
-            // If the provider was removed, just remove the mountpoint.
             this.#mountTable.delete(normalized);
             return;
         }
 
-        // Call provider.unmount if implemented.
         if (provider.unmount) {
             await provider.unmount(normalized);
         }
@@ -93,10 +121,8 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
 
         const provider = this.#vfsTable.get(id)!;
 
-        // Record the mountpoint prior to calling provider.mount so other calls can see it
         this.#mountTable.set(normalized, id);
 
-        // Call provider.mount if implemented. If it throws, undo the mount registration.
         try {
             if (provider.mount) {
                 await provider.mount(normalized);
@@ -178,16 +204,15 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         return provider.stat(subpath);
     }
 
-    async ["party.openv.filesystem.read.read"](fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number): Promise<number> {
-        const entry = this.#fdTable.get(fd);
+    async ["party.openv.filesystem.read.read"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number): Promise<number> {
+        const entry = this.#ofdTable.get(ofd);
         if (!entry) {
-            throw new Error(`Invalid file descriptor ${fd}`);
+            throw new Error(`Invalid open file number ${ofd}`);
         }
         if (!entry.provider || typeof entry.provider.read !== "function") {
-            throw new Error(`File descriptor ${fd} is not backed by a provider that supports read.`);
+            throw new Error(`Open file number ${ofd} is not backed by a provider that supports read.`);
         }
-        // Use providerFd when available, otherwise fall back to the opaque fd.
-        return entry.provider.read(fd, buffer, offset, length, position);
+        return entry.provider.read(ofd, buffer, offset, length, position);
     }
 
     async ["party.openv.filesystem.read.readdir"](path: string): Promise<string[]> {
@@ -215,10 +240,11 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         }
         return provider.watch(subpath, options);
     }
-    // Simple file descriptor allocator and table. We assign opaque fds to callers and map them
-    // to provider-local fds when a virtual filesystem provider is used.
-    #fdCounter = 100;
-    #fdTable: Map<number, {
+    // Global open file table. Each entry is an "open file description" (ofd), analogous
+    // to the Linux open file table. Process-local file descriptors point into this table.
+    // In the system (non-scoped) environment, open/close/read/write operate directly on ofds.
+    #ofdCounter = 100;
+    #ofdTable: Map<number, {
         path: string;
         providerId?: string;
         provider?: Partial<VFS>;
@@ -243,35 +269,33 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         }
 
         const providerOpen = provider.open!;
-        const fd = ++this.#fdCounter;
-        await providerOpen(subpath, fd, flags, mode);
-        this.#fdTable.set(fd, {
+        const ofd = ++this.#ofdCounter;
+        await providerOpen(subpath, ofd, flags, mode);
+        this.#ofdTable.set(ofd, {
             path,
             providerId: id,
             provider,
             flags,
             mode,
         });
-        return fd;
+        return ofd;
     }
 
-    async ["party.openv.filesystem.close"](fd: number): Promise<void> {
-        const entry = this.#fdTable.get(fd);
+    async ["party.openv.filesystem.close"](ofd: number): Promise<void> {
+        const entry = this.#ofdTable.get(ofd);
         if (!entry) {
-            // POSIX semantics: closing an invalid fd is an error. Mirror that with an exception.
-            throw new Error(`Invalid file descriptor ${fd}`);
+            throw new Error(`Invalid open file number ${ofd}`);
         }
 
-        this.#fdTable.delete(fd);
+        this.#ofdTable.delete(ofd);
 
-        // If this fd was backed by a provider and the provider implements close, forward.
+        // If this ofd was backed by a provider and the provider implements close, forward.
         if (entry.provider && typeof entry.provider.close === "function") {
-            // providerFd may be undefined for providers that don't use it; guard anyway.
-            await entry.provider.close(fd);
+            await entry.provider.close(ofd);
             return;
         }
 
-        // Nothing to do for non-provider-backed fds.
+        // Nothing to do for non-provider-backed ofds.
         return;
     }
 
@@ -360,34 +384,59 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         vfs.unlink = handler;
     }
 
-    supports(ns: "party.openv.filesystem.virtual" | "party.openv.filesystem.virtual/0.1.0"): Promise<"party.openv.filesystem.virtual/0.1.0">;
-    supports(ns: "party.openv.filesystem.read" | "party.openv.filesystem.read/0.1.0"): Promise<"party.openv.filesystem.read/0.1.0">;
-    supports(ns: "party.openv.filesystem.write" | "party.openv.filesystem.write/0.1.0"): Promise<"party.openv.filesystem.write/0.1.0">;
-    supports(ns: "party.openv.filesystem" | "party.openv.filesystem/0.1.0"): Promise<"party.openv.filesystem/0.1.0">;
+    // --- CoreFSExt implementations ---
+
+    async ["party.openv.impl.filesystem.readByOfd"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number): Promise<number> {
+        return this["party.openv.filesystem.read.read"](ofd, buffer, offset, length, position);
+    }
+
+    async ["party.openv.impl.filesystem.writeByOfd"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<number> {
+        return this["party.openv.filesystem.write.write"](ofd, buffer, offset, length, position);
+    }
+
+    async ["party.openv.impl.filesystem.closeByOfd"](ofd: number): Promise<void> {
+        return this["party.openv.filesystem.close"](ofd);
+    }
+
+    async ["party.openv.impl.filesystem.hasOfd"](ofd: number): Promise<boolean> {
+        return this.#ofdTable.has(ofd);
+    }
+
+    supports(ns: typeof CORE_FS_EXT_NAMESPACE_VERSIONED | typeof CORE_FS_EXT_NAMESPACE): Promise<typeof CORE_FS_EXT_NAMESPACE_VERSIONED>;
+    supports(ns: typeof FS_VIRTUAL_NAMESPACE | typeof FS_VIRTUAL_NAMESPACE_VERSIONED): Promise<typeof FS_VIRTUAL_NAMESPACE_VERSIONED>;
+    supports(ns: typeof FS_READ_NAMESPACE | typeof FS_READ_NAMESPACE_VERSIONED): Promise<typeof FS_READ_NAMESPACE_VERSIONED>;
+    supports(ns: typeof FS_WRITE_NAMESPACE | typeof FS_WRITE_NAMESPACE_VERSIONED): Promise<typeof FS_WRITE_NAMESPACE_VERSIONED>;
+    supports(ns: typeof FS_NAMESPACE | typeof FS_NAMESPACE_VERSIONED): Promise<typeof FS_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
         if (
-            ns === "party.openv.filesystem.virtual" ||
-            ns === "party.openv.filesystem.virtual/0.1.0"
+            ns === CORE_FS_EXT_NAMESPACE ||
+            ns === CORE_FS_EXT_NAMESPACE_VERSIONED
         ) {
-            return "party.openv.filesystem.virtual/0.1.0";
+            return CORE_FS_EXT_NAMESPACE_VERSIONED;
         }
         if (
-            ns === "party.openv.filesystem.read" ||
-            ns === "party.openv.filesystem.read/0.1.0"
+            ns === FS_VIRTUAL_NAMESPACE ||
+            ns === FS_VIRTUAL_NAMESPACE_VERSIONED
         ) {
-            return "party.openv.filesystem.read/0.1.0";
+            return FS_VIRTUAL_NAMESPACE_VERSIONED;
         }
         if (
-            ns === "party.openv.filesystem.write" ||
-            ns === "party.openv.filesystem.write/0.1.0"
+            ns === FS_READ_NAMESPACE ||
+            ns === FS_READ_NAMESPACE_VERSIONED
         ) {
-            return "party.openv.filesystem.write/0.1.0";
+            return FS_READ_NAMESPACE_VERSIONED;
         }
         if (
-            ns === "party.openv.filesystem" ||
-            ns === "party.openv.filesystem/0.1.0"
+            ns === FS_WRITE_NAMESPACE ||
+            ns === FS_WRITE_NAMESPACE_VERSIONED
         ) {
-            return "party.openv.filesystem/0.1.0";
+            return FS_WRITE_NAMESPACE_VERSIONED;
+        }
+        if (
+            ns === FS_NAMESPACE ||
+            ns === FS_NAMESPACE_VERSIONED
+        ) {
+            return FS_NAMESPACE_VERSIONED;
         }
         return null;
     }
@@ -439,4 +488,120 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         return { id, subpath: sub };
     }
     
+}
+
+/**
+ * Process-scoped filesystem component. Wraps a CoreFS and maintains a per-process
+ * file descriptor table
+ */
+export class ProcessScopedFS implements FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemLocalComponent {
+    #fs: FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemReadWriteComponent & CoreFSExt;
+
+    #fdCounter = 0;
+    #fdToOfd: Map<number, number> = new Map();
+
+    constructor(fs: FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemReadWriteComponent & CoreFSExt) {
+        this.#fs = fs;
+    }
+
+    #resolveOfd(fd: number): number {
+        const ofd = this.#fdToOfd.get(fd);
+        if (ofd === undefined) {
+            throw new Error(`Invalid file descriptor ${fd}`);
+        }
+        return ofd;
+    }
+
+    async ["party.openv.filesystem.open"](path: string, flags: OpenFlags, mode?: FileMode): Promise<number> {
+        // Open on the core FS to get a global ofd
+        const ofd = await this.#fs["party.openv.filesystem.open"](path, flags, mode);
+        // Allocate a process-local fd
+        const fd = ++this.#fdCounter;
+        this.#fdToOfd.set(fd, ofd);
+        return fd;
+    }
+
+    async ["party.openv.filesystem.close"](fd: number): Promise<void> {
+        const ofd = this.#resolveOfd(fd);
+        this.#fdToOfd.delete(fd);
+        await this.#fs["party.openv.impl.filesystem.closeByOfd"](ofd);
+    }
+
+    async ["party.openv.filesystem.read.stat"](path: string): Promise<FsStats> {
+        return this.#fs["party.openv.filesystem.read.stat"](path);
+    }
+
+    async ["party.openv.filesystem.read.read"](fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number): Promise<number> {
+        const ofd = this.#resolveOfd(fd);
+        return this.#fs["party.openv.impl.filesystem.readByOfd"](ofd, buffer, offset, length, position);
+    }
+
+    async ["party.openv.filesystem.read.readdir"](path: string): Promise<string[]> {
+        return this.#fs["party.openv.filesystem.read.readdir"](path);
+    }
+
+    async ["party.openv.filesystem.read.watch"](path: string, options?: { recursive?: boolean }): Promise<{
+        events: AsyncIterable<FileSystemEvent>;
+        abort: () => Promise<void>;
+    }> {
+        return this.#fs["party.openv.filesystem.read.watch"](path, options);
+    }
+
+    async ["party.openv.filesystem.write.write"](fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<number> {
+        const ofd = this.#resolveOfd(fd);
+        return this.#fs["party.openv.impl.filesystem.writeByOfd"](ofd, buffer, offset, length, position);
+    }
+
+    async ["party.openv.filesystem.write.create"](path: string, mode?: FileMode): Promise<void> {
+        return this.#fs["party.openv.filesystem.write.create"](path, mode);
+    }
+
+    async ["party.openv.filesystem.write.mkdir"](path: string, mode?: FileMode): Promise<void> {
+        return this.#fs["party.openv.filesystem.write.mkdir"](path, mode);
+    }
+
+    async ["party.openv.filesystem.write.rmdir"](path: string): Promise<void> {
+        return this.#fs["party.openv.filesystem.write.rmdir"](path);
+    }
+
+    async ["party.openv.filesystem.write.rename"](oldPath: string, newPath: string): Promise<void> {
+        return this.#fs["party.openv.filesystem.write.rename"](oldPath, newPath);
+    }
+
+    async ["party.openv.filesystem.write.unlink"](path: string): Promise<void> {
+        return this.#fs["party.openv.filesystem.write.unlink"](path);
+    }
+
+    async ["party.openv.filesystem.local.listfds"](): Promise<number[]> {
+        return Array.from(this.#fdToOfd.keys());
+    }
+
+    async ["party.openv.filesystem.local.dupfd"](fd: number): Promise<number> {
+        const ofd = this.#resolveOfd(fd);
+        const newFd = ++this.#fdCounter;
+        this.#fdToOfd.set(newFd, ofd);
+        return newFd;
+    }
+
+    async supports(ns: typeof FS_NAMESPACE | typeof FS_NAMESPACE_VERSIONED): Promise<typeof FS_NAMESPACE_VERSIONED>;
+    async supports(ns: typeof FS_READ_NAMESPACE | typeof FS_READ_NAMESPACE_VERSIONED): Promise<typeof FS_READ_NAMESPACE_VERSIONED>;
+    async supports(ns: typeof FS_WRITE_NAMESPACE | typeof FS_WRITE_NAMESPACE_VERSIONED): Promise<typeof FS_WRITE_NAMESPACE_VERSIONED>;
+    async supports(ns: typeof FS_LOCAL_NAMESPACE | typeof FS_LOCAL_NAMESPACE_VERSIONED): Promise<typeof FS_LOCAL_NAMESPACE_VERSIONED>;
+    async supports(ns: string): Promise<string | null> {
+        switch (ns) {
+            case FS_NAMESPACE:
+            case FS_NAMESPACE_VERSIONED:
+                return FS_NAMESPACE_VERSIONED;
+            case FS_READ_NAMESPACE:
+            case FS_READ_NAMESPACE_VERSIONED:
+                return FS_READ_NAMESPACE_VERSIONED;
+            case FS_WRITE_NAMESPACE:
+            case FS_WRITE_NAMESPACE_VERSIONED:
+                return FS_WRITE_NAMESPACE_VERSIONED;
+            case FS_LOCAL_NAMESPACE:
+            case FS_LOCAL_NAMESPACE_VERSIONED:
+                return FS_LOCAL_NAMESPACE_VERSIONED;
+        }
+        return null;
+    }
 }

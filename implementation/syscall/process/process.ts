@@ -1,4 +1,4 @@
-import type { FileSystemCoreComponent, FileSystemReadOnlyComponent, SystemComponent } from "../../../openv/syscall";
+import type { SystemComponent } from "../../../openv/syscall";
 import { PROCESS_LOCAL_NAMESPACE, PROCESS_LOCAL_NAMESPACE_VERSIONED, PROCESS_NAMESPACE, PROCESS_NAMESPACE_VERSIONED, PROCESS_SIGNAL_NOTIFYEXIT, type ProcessComponent, type ProcessLocalComponent } from "../../../openv/syscall/process";
 
 type SignalHandler = (cx: { signal: string; uid: number; gid: number; pid: number }) => Promise<void>;

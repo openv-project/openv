@@ -1,4 +1,4 @@
-import { PlainParameter, SystemLinkParameter } from "./wire";
+import { PlainParameter } from "./wire";
 
 export interface SystemLinkPeer {
     // function registry that has all the calls that this peer can handle.
