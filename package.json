@@ -1,6 +1,18 @@
 {
+    "type": "module",
     "workspaces": [
         "packages/*"
     ],
-    "license": "MIT"
+    "license": "MIT",
+    "scripts": {
+        "build": "rollup -c && npm run build:types",
+        "build:types": "tsc -p packages/openv-api/tsconfig.types.json && tsc -p packages/openv-core/tsconfig.types.json && tsc -p packages/party.openv.api.fs/tsconfig.types.json && tsc -p packages/party.openv.api.registry/tsconfig.types.json"
+    },
+    "devDependencies": {
+        "@rollup/plugin-node-resolve": "^16.0.3",
+        "@rollup/plugin-typescript": "^12.3.0",
+        "rollup": "^4.59.0",
+        "tslib": "^2.8.1",
+        "typescript": "^5.9.3"
+    }
 }
