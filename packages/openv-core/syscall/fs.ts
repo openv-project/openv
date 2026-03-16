@@ -1,4 +1,4 @@
-import { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemVirtualComponent, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, SystemComponent } from "@openv-project/openv-api"
+import { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemVirtualComponent, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, SystemComponent } from "@openv-project/openv-api"
 
 type VFS = {
     mount: (path: string) => Promise<void>;
@@ -46,9 +46,16 @@ export interface CoreFSExt extends SystemComponent<typeof CORE_FS_EXT_NAMESPACE_
      * Check if an OFD is valid and has an associated provider.
      */
     ["party.openv.impl.filesystem.hasOfd"](ofd: number): Promise<boolean>;
+
+    /**
+     * Create an anonymous pipe at the OFD level. Returns [readOfd, writeOfd].
+     * Both OFDs are entries in the global open file table backed by a shared
+     * in-memory ring buffer.
+     */
+    ["party.openv.impl.filesystem.createPipeOfd"](bufferSize?: number): Promise<[readOfd: number, writeOfd: number]>;
 }
 
-export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, CoreFSExt {
+export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemPipeComponent, CoreFSExt {
     async ["party.openv.filesystem.write.create"](path: string, mode?: FileMode): Promise<void> {
         const resolved = this.#resolveMountPath(path);
         if (!resolved) {
@@ -382,17 +389,57 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         vfs.unlink = handler;
     }
 
-    // --- CoreFSExt implementations ---
+    static readonly DEFAULT_PIPE_BUFFER_SIZE = 65536;
+
+    /**
+     * Internal pipe state. A pipe is a unidirectional in-memory byte stream shared
+     * between a read OFD and a write OFD.
+     */
+    #pipeTable: Map<number, {
+        buffer: Uint8Array;
+        /** Write cursor — how many bytes have been written into the buffer. */
+        head: number;
+        /** Read cursor — how many bytes have been consumed from the buffer. */
+        tail: number;
+        readClosed: boolean;
+        writeClosed: boolean;
+        /** Resolvers for readers waiting for data (or EOF). */
+        pendingReaders: Array<() => void>;
+        /** Resolvers for writers waiting for space. */
+        pendingWriters: Array<() => void>;
+    }> = new Map();
+
+    #pipeIdCounter = 0;
+
+    /**
+     * Maps an OFD to its pipe id and role ("read" or "write").
+     */
+    #ofdToPipe: Map<number, { pipeId: number; role: "read" | "write" }> = new Map();
 
     async ["party.openv.impl.filesystem.readByOfd"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number): Promise<number> {
+        const pipeInfo = this.#ofdToPipe.get(ofd);
+        if (pipeInfo && pipeInfo.role === "read") {
+            return this.#pipeRead(pipeInfo.pipeId, buffer, offset, length);
+        }
         return this["party.openv.filesystem.read.read"](ofd, buffer, offset, length, position);
     }
 
     async ["party.openv.impl.filesystem.writeByOfd"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<number> {
+        const pipeInfo = this.#ofdToPipe.get(ofd);
+        if (pipeInfo && pipeInfo.role === "write") {
+            return this.#pipeWrite(pipeInfo.pipeId, buffer, offset, length);
+        }
         return this["party.openv.filesystem.write.write"](ofd, buffer, offset, length, position);
     }
 
     async ["party.openv.impl.filesystem.closeByOfd"](ofd: number): Promise<void> {
+        const pipeInfo = this.#ofdToPipe.get(ofd);
+        if (pipeInfo) {
+            this.#pipeCloseEnd(pipeInfo.pipeId, pipeInfo.role);
+            this.#ofdToPipe.delete(ofd);
+            this.#ofdTable.delete(ofd);
+            return;
+        }
         return this["party.openv.filesystem.close"](ofd);
     }
 
@@ -400,7 +447,142 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         return this.#ofdTable.has(ofd);
     }
 
+    async ["party.openv.impl.filesystem.createPipeOfd"](bufferSize?: number): Promise<[readOfd: number, writeOfd: number]> {
+        return this.#createPipeOfdPair(bufferSize);
+    }
+
+    async ["party.openv.filesystem.pipe.create"](bufferSize?: number): Promise<[readEnd: number, writeEnd: number]> {
+        return this.#createPipeOfdPair(bufferSize);
+    }
+
+    #createPipeOfdPair(bufferSize?: number): [readOfd: number, writeOfd: number] {
+        const size = bufferSize ?? CoreFS.DEFAULT_PIPE_BUFFER_SIZE;
+        const pipeId = ++this.#pipeIdCounter;
+
+        this.#pipeTable.set(pipeId, {
+            buffer: new Uint8Array(size),
+            head: 0,
+            tail: 0,
+            readClosed: false,
+            writeClosed: false,
+            pendingReaders: [],
+            pendingWriters: [],
+        });
+
+        const readOfd = ++this.#ofdCounter;
+        const writeOfd = ++this.#ofdCounter;
+
+        this.#ofdTable.set(readOfd, {
+            path: `<pipe:${pipeId}:read>`,
+            flags: "r",
+            mode: 0,
+        });
+        this.#ofdTable.set(writeOfd, {
+            path: `<pipe:${pipeId}:write>`,
+            flags: "w",
+            mode: 0,
+        });
+
+        this.#ofdToPipe.set(readOfd, { pipeId, role: "read" });
+        this.#ofdToPipe.set(writeOfd, { pipeId, role: "write" });
+
+        return [readOfd, writeOfd];
+    }
+
+    async #pipeRead(pipeId: number, buffer: Uint8Array, offset?: number, length?: number): Promise<number> {
+        const pipe = this.#pipeTable.get(pipeId);
+        if (!pipe) throw new Error(`Pipe ${pipeId} does not exist.`);
+
+        const dstOffset = offset ?? 0;
+        const maxRead = length ?? (buffer.length - dstOffset);
+
+        while (pipe.head === pipe.tail && !pipe.writeClosed) {
+            await new Promise<void>(resolve => pipe.pendingReaders.push(resolve));
+        }
+
+        if (pipe.head === pipe.tail && pipe.writeClosed) {
+            return 0;
+        }
+
+        const available = pipe.head - pipe.tail;
+        const toRead = Math.min(maxRead, available);
+        buffer.set(pipe.buffer.subarray(pipe.tail, pipe.tail + toRead), dstOffset);
+        pipe.tail += toRead;
+
+        if (pipe.tail === pipe.head) {
+            pipe.tail = 0;
+            pipe.head = 0;
+        }
+
+        for (const resolve of pipe.pendingWriters.splice(0)) {
+            resolve();
+        }
+
+        return toRead;
+    }
+
+    async #pipeWrite(pipeId: number, buffer: Uint8Array, offset?: number, length?: number): Promise<number> {
+        const pipe = this.#pipeTable.get(pipeId);
+        if (!pipe) throw new Error(`Pipe ${pipeId} does not exist.`);
+        if (pipe.readClosed) throw new Error(`Broken pipe: read end is closed.`);
+
+        const srcOffset = offset ?? 0;
+        const toWrite = length ?? (buffer.length - srcOffset);
+        const src = buffer.subarray(srcOffset, srcOffset + toWrite);
+
+        let written = 0;
+        while (written < src.length) {
+            if (pipe.readClosed) throw new Error(`Broken pipe: read end is closed.`);
+
+            const space = pipe.buffer.length - pipe.head;
+            if (space === 0) {
+                if (pipe.tail > 0) {
+                    const remaining = pipe.head - pipe.tail;
+                    pipe.buffer.copyWithin(0, pipe.tail, pipe.head);
+                    pipe.tail = 0;
+                    pipe.head = remaining;
+                    continue;
+                }
+                await new Promise<void>(resolve => pipe.pendingWriters.push(resolve));
+                continue;
+            }
+
+            const chunk = Math.min(src.length - written, space);
+            pipe.buffer.set(src.subarray(written, written + chunk), pipe.head);
+            pipe.head += chunk;
+            written += chunk;
+
+            for (const resolve of pipe.pendingReaders.splice(0)) {
+                resolve();
+            }
+        }
+
+        return written;
+    }
+
+    #pipeCloseEnd(pipeId: number, role: "read" | "write"): void {
+        const pipe = this.#pipeTable.get(pipeId);
+        if (!pipe) return;
+
+        if (role === "read") {
+            pipe.readClosed = true;
+            for (const resolve of pipe.pendingWriters.splice(0)) {
+                resolve();
+            }
+        } else {
+            pipe.writeClosed = true;
+            for (const resolve of pipe.pendingReaders.splice(0)) {
+                resolve();
+            }
+        }
+
+        if (pipe.readClosed && pipe.writeClosed) {
+            this.#pipeTable.delete(pipeId);
+        }
+    }
+
     supports(ns: typeof CORE_FS_EXT_NAMESPACE_VERSIONED | typeof CORE_FS_EXT_NAMESPACE): Promise<typeof CORE_FS_EXT_NAMESPACE_VERSIONED>;
+    supports(ns: typeof FS_PIPE_NAMESPACE | typeof FS_PIPE_NAMESPACE_VERSIONED): Promise<typeof FS_PIPE_NAMESPACE_VERSIONED>;
     supports(ns: typeof FS_VIRTUAL_NAMESPACE | typeof FS_VIRTUAL_NAMESPACE_VERSIONED): Promise<typeof FS_VIRTUAL_NAMESPACE_VERSIONED>;
     supports(ns: typeof FS_READ_NAMESPACE | typeof FS_READ_NAMESPACE_VERSIONED): Promise<typeof FS_READ_NAMESPACE_VERSIONED>;
     supports(ns: typeof FS_WRITE_NAMESPACE | typeof FS_WRITE_NAMESPACE_VERSIONED): Promise<typeof FS_WRITE_NAMESPACE_VERSIONED>;
@@ -411,6 +593,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             ns === CORE_FS_EXT_NAMESPACE_VERSIONED
         ) {
             return CORE_FS_EXT_NAMESPACE_VERSIONED;
+        }
+        if (
+            ns === FS_PIPE_NAMESPACE ||
+            ns === FS_PIPE_NAMESPACE_VERSIONED
+        ) {
+            return FS_PIPE_NAMESPACE_VERSIONED;
         }
         if (
             ns === FS_VIRTUAL_NAMESPACE ||
@@ -495,10 +683,13 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
 export class ProcessScopedFS implements FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemLocalComponent {
     #fs: FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemReadWriteComponent & CoreFSExt;
 
-    #fdCounter = 0;
+    /**
+     * Next fd to allocate. Starts at 3 to avoid clashing.
+     */
+    #fdCounter = 2;
     #fdToOfd: Map<number, number> = new Map();
 
-    constructor(fs: FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemReadWriteComponent & CoreFSExt) {
+    constructor(fs: FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemReadWriteComponent & FileSystemPipeComponent & CoreFSExt) {
         this.#fs = fs;
     }
 
@@ -581,10 +772,50 @@ export class ProcessScopedFS implements FileSystemCoreComponent, FileSystemReadO
         return newFd;
     }
 
+    async ["party.openv.filesystem.local.dup2"](fd: number, targetFd: number): Promise<number> {
+        const ofd = this.#resolveOfd(fd);
+        if (this.#fdToOfd.has(targetFd) && targetFd !== fd) {
+            const existingOfd = this.#fdToOfd.get(targetFd)!;
+            this.#fdToOfd.delete(targetFd);
+            await this.#fs["party.openv.impl.filesystem.closeByOfd"](existingOfd);
+        }
+        this.#fdToOfd.set(targetFd, ofd);
+        if (targetFd > this.#fdCounter) {
+            this.#fdCounter = targetFd;
+        }
+        return targetFd;
+    }
+
+    async ["party.openv.filesystem.local.setfd"](targetFd: number, ofd: number): Promise<void> {
+        if (!await this.#fs["party.openv.impl.filesystem.hasOfd"](ofd)) {
+            throw new Error(`Global open file number ${ofd} does not exist.`);
+        }
+        if (this.#fdToOfd.has(targetFd)) {
+            const existingOfd = this.#fdToOfd.get(targetFd)!;
+            this.#fdToOfd.delete(targetFd);
+            await this.#fs["party.openv.impl.filesystem.closeByOfd"](existingOfd);
+        }
+        this.#fdToOfd.set(targetFd, ofd);
+        if (targetFd > this.#fdCounter) {
+            this.#fdCounter = targetFd;
+        }
+    }
+
+    async ["party.openv.filesystem.pipe.create"](bufferSize?: number): Promise<[readEnd: number, writeEnd: number]> {
+        const [readOfd, writeOfd] = await this.#fs["party.openv.impl.filesystem.createPipeOfd"](bufferSize);
+        // Allocate process-local fds
+        const readFd = ++this.#fdCounter;
+        const writeFd = ++this.#fdCounter;
+        this.#fdToOfd.set(readFd, readOfd);
+        this.#fdToOfd.set(writeFd, writeOfd);
+        return [readFd, writeFd];
+    }
+
     async supports(ns: typeof FS_NAMESPACE | typeof FS_NAMESPACE_VERSIONED): Promise<typeof FS_NAMESPACE_VERSIONED>;
     async supports(ns: typeof FS_READ_NAMESPACE | typeof FS_READ_NAMESPACE_VERSIONED): Promise<typeof FS_READ_NAMESPACE_VERSIONED>;
     async supports(ns: typeof FS_WRITE_NAMESPACE | typeof FS_WRITE_NAMESPACE_VERSIONED): Promise<typeof FS_WRITE_NAMESPACE_VERSIONED>;
     async supports(ns: typeof FS_LOCAL_NAMESPACE | typeof FS_LOCAL_NAMESPACE_VERSIONED): Promise<typeof FS_LOCAL_NAMESPACE_VERSIONED>;
+    async supports(ns: typeof FS_PIPE_NAMESPACE | typeof FS_PIPE_NAMESPACE_VERSIONED): Promise<typeof FS_PIPE_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
         switch (ns) {
             case FS_NAMESPACE:
@@ -599,6 +830,9 @@ export class ProcessScopedFS implements FileSystemCoreComponent, FileSystemReadO
             case FS_LOCAL_NAMESPACE:
             case FS_LOCAL_NAMESPACE_VERSIONED:
                 return FS_LOCAL_NAMESPACE_VERSIONED;
+            case FS_PIPE_NAMESPACE:
+            case FS_PIPE_NAMESPACE_VERSIONED:
+                return FS_PIPE_NAMESPACE_VERSIONED;
         }
         return null;
     }

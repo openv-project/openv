@@ -1,14 +1,14 @@
-import { FileSystemCoreComponent, FileSystemReadOnlyComponent } from "@openv-project/openv-api";
+import { FileSystemCoreComponent, FileSystemLocalComponent, FileSystemReadOnlyComponent } from "@openv-project/openv-api";
 import { createPostMessageTransport, ProcessExecutor, ProcessSpawnContext } from "../../mod.ts"
 
-export type EnvironmentBuilder<T extends FileSystemCoreComponent & FileSystemReadOnlyComponent, U extends FileSystemCoreComponent & FileSystemReadOnlyComponent> = (sys: T, ctx: ProcessSpawnContext) => Promise<U>;
+export type EnvironmentBuilder<T extends FileSystemCoreComponent & FileSystemReadOnlyComponent, U extends FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemLocalComponent> = (sys: T, ctx: ProcessSpawnContext) => Promise<U>;
 
 export class WebExecutor<T extends FileSystemCoreComponent & FileSystemReadOnlyComponent> implements ProcessExecutor {
     #sys: T;
-    #environmentBuilder: EnvironmentBuilder<T, FileSystemCoreComponent & FileSystemReadOnlyComponent>;
+    #environmentBuilder: EnvironmentBuilder<T, FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemLocalComponent>;
     #workers: Map<number, Worker> = new Map();
 
-    constructor(sys: T, environmentBuilder: EnvironmentBuilder<T, FileSystemCoreComponent & FileSystemReadOnlyComponent>) {
+    constructor(sys: T, environmentBuilder: EnvironmentBuilder<T, FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemLocalComponent>) {
         this.#sys = sys;
         this.#environmentBuilder = environmentBuilder;
     }
@@ -65,7 +65,7 @@ export class WebExecutor<T extends FileSystemCoreComponent & FileSystemReadOnlyC
         return Promise.resolve();
     }
 
-    setEnvironmentBuilder(builder: EnvironmentBuilder<T, FileSystemCoreComponent & FileSystemReadOnlyComponent>): void {
+    setEnvironmentBuilder(builder: EnvironmentBuilder<T, FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemLocalComponent>): void {
         this.#environmentBuilder = builder;
     }
 }

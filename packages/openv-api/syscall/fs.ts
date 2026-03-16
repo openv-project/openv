@@ -24,6 +24,28 @@ export interface FileSystemEvent {
     filename: string;
 }
 
+/**
+ * Describes how a stdio fd should be wired when spawning a process.
+ * - `"pipe"`: Create a new pipe; the parent receives an fd to the other end.
+ * - `"inherit"`: Inherit the parent's fd for this slot (stdin/stdout/stderr).
+ * - `number`: Use this specific fd from the parent process as the child's fd.
+ * - `null` or `undefined`: Use the default behavior (typically inherit, or /dev/null equivalent).
+ */
+export type StdioOption = "pipe" | "inherit" | number | null | undefined;
+
+/**
+ * The result of spawning a process with piped stdio. Each field is present only when
+ * the corresponding stdio option was `"pipe"`.
+ */
+export interface SpawnStdioResult {
+    /** Parent-side fd for writing to the child's stdin. Present when stdin is "pipe". */
+    stdin?: number;
+    /** Parent-side fd for reading from the child's stdout. Present when stdout is "pipe". */
+    stdout?: number;
+    /** Parent-side fd for reading from the child's stderr. Present when stderr is "pipe". */
+    stderr?: number;
+}
+
 export const FS_NAMESPACE = "party.openv.filesystem" as const;
 export const FS_NAMESPACE_VERSIONED = `${FS_NAMESPACE}/0.1.0` as const;
 export const FS_READ_NAMESPACE = `${FS_NAMESPACE}.read` as const;
@@ -34,6 +56,8 @@ export const FS_VIRTUAL_NAMESPACE = `${FS_NAMESPACE}.virtual` as const;
 export const FS_VIRTUAL_NAMESPACE_VERSIONED = `${FS_VIRTUAL_NAMESPACE}/0.1.0` as const;
 export const FS_LOCAL_NAMESPACE = `${FS_NAMESPACE}.local` as const;
 export const FS_LOCAL_NAMESPACE_VERSIONED = `${FS_LOCAL_NAMESPACE}/0.1.0` as const;
+export const FS_PIPE_NAMESPACE = `${FS_NAMESPACE}.pipe` as const;
+export const FS_PIPE_NAMESPACE_VERSIONED = `${FS_PIPE_NAMESPACE}/0.1.0` as const;
 
 /**
  * The core file system component that provides the open/close interface.
@@ -112,6 +136,34 @@ export interface FileSystemLocalComponent extends SystemComponent<typeof FS_LOCA
      * Duplicate a file descriptor, returning a new local fd pointing to the same global open file number.
      */
     ["party.openv.filesystem.local.dupfd"](fd: number): Promise<number>;
+
+    /**
+     * Duplicate a file descriptor to a specific target fd number.
+     * If `targetFd` is already open, it is silently closed first.
+     * After this call, `targetFd` points to the same global open file number as `fd`.
+     */
+    ["party.openv.filesystem.local.dup2"](fd: number, targetFd: number): Promise<number>;
+
+    /**
+     * Insert a global open file number into the local fd table at a specific target fd number.
+     * 
+     * Security note:
+     * This method is okay to expose, as permission checks are enforced by the global open file table.
+     */
+    ["party.openv.filesystem.local.setfd"](targetFd: number, ofd: number): Promise<void>;
+}
+
+/**
+ * A system component for creating anonymous pipes. Pipes are unidirectional byte streams
+ * that are members of the open file table. Pipe methods return open file numbers in system environment
+ * and local fds in process environment.
+ */
+export interface FileSystemPipeComponent extends SystemComponent<typeof FS_PIPE_NAMESPACE_VERSIONED, typeof FS_PIPE_NAMESPACE> {
+    /**
+     * Create an anonymous unidirectional pipe.
+     * The returned file numbers/fds are ordered as [readEnd, writeEnd], where readEnd is readable and writeEnd is writable.
+     */
+    ["party.openv.filesystem.pipe.create"](bufferSize?: number): Promise<[readEnd: number, writeEnd: number]>;
 }
 
 export interface FileSystemVirtualComponent extends SystemComponent<typeof FS_VIRTUAL_NAMESPACE_VERSIONED, typeof FS_VIRTUAL_NAMESPACE> {

@@ -1,4 +1,5 @@
-import { PROCESS_LOCAL_NAMESPACE, PROCESS_LOCAL_NAMESPACE_VERSIONED, PROCESS_NAMESPACE, PROCESS_NAMESPACE_VERSIONED, PROCESS_SIGNAL_NOTIFYEXIT, SystemComponent, type ProcessComponent, type ProcessLocalComponent } from "@openv-project/openv-api";
+import { PROCESS_LOCAL_NAMESPACE, PROCESS_LOCAL_NAMESPACE_VERSIONED, PROCESS_NAMESPACE, PROCESS_NAMESPACE_VERSIONED, PROCESS_SIGNAL_NOTIFYEXIT, SystemComponent, type ProcessComponent, type ProcessLocalComponent, type SpawnStdioResult, type StdioOption } from "@openv-project/openv-api";
+import type { CoreFSExt } from "../fs.ts";
 
 type SignalHandler = (cx: { signal: string; uid: number; gid: number; pid: number }) => Promise<void>;
 
@@ -26,6 +27,12 @@ export interface ProcessSpawnContext {
     exe: string;
     args: string[];
     env: Record<string, string>;
+    /**
+     * The global OFDs that should be injected into this process's fd table as
+     * fds 0 (stdin), 1 (stdout), 2 (stderr). Each entry is present only when
+     * the corresponding stdio slot was wired (pipe, inherit, or explicit fd).
+     */
+    stdioOfds?: [stdinOfd?: number, stdoutOfd?: number, stderrOfd?: number];
 }
 
 export interface ProcessExecutor {
@@ -51,6 +58,21 @@ export class CoreProcess implements ProcessComponent, CoreProcessExt {
     #pidCounter = 0;
     #processTable: Map<number, ProcessEntry> = new Map();
     #executor: ProcessExecutor | null = null;
+    #fsExt: CoreFSExt | null = null;
+
+    /**
+     * Parent-side pipe fds returned after a spawn with stdio "pipe" options.
+     * Keyed by child pid. Cleaned up when the process entry is destroyed.
+     */
+    #stdioResults: Map<number, SpawnStdioResult> = new Map();
+
+    /**
+     * Provide a reference to the core filesystem extension so that the process
+     * manager can create pipes for stdio wiring.
+     */
+    setFsExt(fsExt: CoreFSExt): void {
+        this.#fsExt = fsExt;
+    }
 
     async ["party.openv.impl.process.setExecutor"](executor: ProcessExecutor): Promise<void> {
         this.#executor = executor;
@@ -80,6 +102,7 @@ export class CoreProcess implements ProcessComponent, CoreProcessExt {
                     }
                     entry.waiters = [];
                     this.#processTable.delete(senderPid);
+                    this.#stdioResults.delete(senderPid);
                     // Allow the executor to perform cleanup
                     if (this.#executor) {
                         await this.#executor.destroy(senderPid).catch(() => {
@@ -144,7 +167,7 @@ export class CoreProcess implements ProcessComponent, CoreProcessExt {
     async ["party.openv.process.spawn"](
         command: string,
         args?: string[],
-        options?: { env?: Record<string, string>; cwd?: string; uid?: number; gid?: number; ppid?: number }
+        options?: { env?: Record<string, string>; cwd?: string; uid?: number; gid?: number; ppid?: number; stdio?: [stdin?: StdioOption, stdout?: StdioOption, stderr?: StdioOption] }
     ): Promise<number> {
         // In the system environment all options are mandatory per spec.
         if (options?.cwd === undefined || options?.env === undefined) {
@@ -164,14 +187,45 @@ export class CoreProcess implements ProcessComponent, CoreProcessExt {
             env: options.env,
         });
 
+        const stdioSpec = options.stdio;
+        const stdioOfds: [number | undefined, number | undefined, number | undefined] = [undefined, undefined, undefined];
+        const stdioResult: SpawnStdioResult = {};
+
+        if (stdioSpec && this.#fsExt) {
+            for (let i = 0; i < 3; i++) {
+                const opt = stdioSpec[i];
+                if (opt === "pipe") {
+                    const [readOfd, writeOfd] = await this.#fsExt["party.openv.impl.filesystem.createPipeOfd"]();
+                    if (i === 0) {
+                        stdioOfds[i] = readOfd;
+                        stdioResult.stdin = writeOfd;
+                    } else {
+                        stdioOfds[i] = writeOfd;
+                        if (i === 1) stdioResult.stdout = readOfd;
+                        else stdioResult.stderr = readOfd;
+                    }
+                } else if (typeof opt === "number") {
+                    stdioOfds[i] = opt;
+                }
+            }
+        }
+
+        if (stdioResult.stdin !== undefined || stdioResult.stdout !== undefined || stdioResult.stderr !== undefined) {
+            this.#stdioResults.set(pid, stdioResult);
+        }
+
         const entry = this.#getEntry(pid);
-        const ctx: ProcessSpawnContext = { ...entry, env: { ...entry.env } };
+        const ctx: ProcessSpawnContext = { ...entry, env: { ...entry.env }, stdioOfds };
 
         this.#executor.run(ctx).catch(() => {
             this["party.openv.impl.process.exitProcess"](pid, null);
         });
 
         return pid;
+    }
+
+    async ["party.openv.process.getstdio"](pid: number): Promise<SpawnStdioResult> {
+        return this.#stdioResults.get(pid) ?? {};
     }
 
     async ["party.openv.process.kill"](pid: number): Promise<void> {
@@ -264,7 +318,7 @@ export class ProcessScopedProcess implements ProcessComponent, ProcessLocalCompo
     async ["party.openv.process.spawn"](
         command: string,
         args?: string[],
-        options?: { env?: Record<string, string>; cwd?: string; uid?: number; gid?: number; ppid?: number }
+        options?: { env?: Record<string, string>; cwd?: string; uid?: number; gid?: number; ppid?: number; stdio?: [stdin?: StdioOption, stdout?: StdioOption, stderr?: StdioOption] }
     ): Promise<number> {
         const self = await this.#process["party.openv.impl.process.getEntry"](this.#pid);
 
@@ -280,6 +334,10 @@ export class ProcessScopedProcess implements ProcessComponent, ProcessLocalCompo
             cwd: options?.cwd ?? self.cwd,
             env: options?.env ?? { ...self.env },
         });
+    }
+
+    async ["party.openv.process.getstdio"](pid: number): Promise<SpawnStdioResult> {
+        return this.#process["party.openv.process.getstdio"](pid);
     }
 
     async ["party.openv.process.kill"](pid: number): Promise<void> {

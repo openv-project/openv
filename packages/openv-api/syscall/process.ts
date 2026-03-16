@@ -1,4 +1,5 @@
 import type { SystemComponent } from "./mod.ts";
+import type { SpawnStdioResult, StdioOption } from "./fs.ts";
 
 export const PROCESS_NAMESPACE = "party.openv.process" as const;
 export const PROCESS_NAMESPACE_VERSIONED = `${PROCESS_NAMESPACE}/0.1.0` as const;
@@ -27,8 +28,30 @@ export interface ProcessComponent extends SystemComponent<typeof PROCESS_NAMESPA
      * @param options Additional options for spawning the process. `env` is an object containing environment variables to set for the process, and `cwd`
      * is the working directory to spawn the process in. Note that if this is called in the system environment instead of a process,
      * all options are mandatory. Attempting to set `ppid` in a process environment will be ignored, and `uid` and `gid` will throw errors unless in a system environment or a process environment with uid/gid 0.
+     * `stdio` controls how the child's stdin (fd 0), stdout (fd 1), and stderr (fd 2) are wired:
+     * - `"pipe"`: create a pipe; the parent gets an fd to the other end (returned in the result).
+     * - `"inherit"`: the child inherits the parent's fd for that slot.
+     * - a `number`: use that specific fd from the parent as the child's fd.
+     * - `null`/`undefined`: default (inherit when in a process, /dev/null equivalent otherwise).
+     * @returns The pid of the spawned process. When `stdio` contains `"pipe"` entries,
+     * use `party.openv.process.getstdio` to retrieve the parent-side pipe fds.
      */
-    [`party.openv.process.spawn`](command: string, args?: string[], options?: { env?: Record<string, string>, cwd?: string, uid?: number, gid?: number, ppid?: number }): Promise<number>;
+    [`party.openv.process.spawn`](command: string, args?: string[], options?: {
+        env?: Record<string, string>,
+        cwd?: string,
+        uid?: number,
+        gid?: number,
+        ppid?: number,
+        stdio?: [stdin?: StdioOption, stdout?: StdioOption, stderr?: StdioOption]
+    }): Promise<number>;
+
+    /**
+     * Retrieve the parent-side pipe file descriptors that were created during spawn when
+     * stdio options included `"pipe"`. Returns the SpawnStdioResult for the given pid.
+     * This should be called shortly after spawn; the result is available until the
+     * process exits and is cleaned up.
+     */
+    [`party.openv.process.getstdio`](pid: number): Promise<SpawnStdioResult>;
 
     /**
      * Kill a process without signaling. This will guarantee that the process is killed, as long as the caller has permission to kill the process, which heavily depends on the environment.
