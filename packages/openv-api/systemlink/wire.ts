@@ -1,10 +1,11 @@
-export type PlainParameter = string | number | boolean | { [key: string]: PlainParameter } | PlainParameter[] | ((...args: PlainParameter[]) => Promise<PlainParameter>) | void | null | undefined;
+export type PlainParameter = string | number | boolean | { [key: string]: PlainParameter } | PlainParameter[] | ((...args: PlainParameter[]) => Promise<PlainParameter>) | AsyncIterable<PlainParameter> | void | null | undefined;
 
 export type SystemLinkParameter = {
     literal: string | number | boolean | { [key: string]: SystemLinkParameter } | SystemLinkParameter[] | null;
 } | {
     method: string;
-} | undefined;
+} | { stream: number }
+    | undefined;
 
 export type SystemLinkCall = {
     type: "call";
@@ -22,13 +23,20 @@ export type SystemLinkResponseFailure = {
     err: string;
 }
 
+export type SystemLinkStreamChunk = {
+    type: "stream";
+    value?: SystemLinkParameter;
+    done?: boolean;
+    err?: string;
+};
+
 export type SystemLinkResponse = {
     type: "response";
 } & (SystemLinkResponseSuccess | SystemLinkResponseFailure);
 
 export type SystemLinkMessage = {
     id: number;
-} & (SystemLinkCall | SystemLinkResponse);
+} & (SystemLinkCall | SystemLinkResponse | SystemLinkStreamChunk);
 
 export type SystemLinkTransport = {
     send(message: SystemLinkMessage): Promise<void>;

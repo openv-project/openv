@@ -16,6 +16,12 @@ export default (async () => {
         try {
             const packageJson = await readFile(`./packages/${file}/package.json`, "utf-8");
             const packageConfig = JSON.parse(packageJson);
+
+            if (packageConfig.skipRollup) {
+                console.log(`Skipping ${file} due to skipRollup flag.`);
+                continue;
+            }
+
             const userRollupOptions = packageConfig.rollupOptions || {};
             
             // Use user-provided input, or fall back to default "mod.ts"

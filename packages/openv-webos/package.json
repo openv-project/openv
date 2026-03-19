@@ -1,0 +1,19 @@
+{
+    "name": "@openv-project/openv-webos",
+    "version": "0.1.0",
+    "description": "OpEnv as a local-first WebOS",
+    "main": "mod.ts",
+    "types": "mod.ts",
+    "skipRollup": true,
+    "scripts": {
+        "build": "tsc -p tsconfig.json"
+    },
+    "license": "MIT",
+    "dependencies": {
+        "@openv-project/openv-api": "^0.1.0",
+        "@openv-project/openv-core": "^0.1.0"
+    },
+    "devDependencies": {
+        "vite": "^8.0.0"
+    }
+}

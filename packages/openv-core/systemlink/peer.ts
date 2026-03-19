@@ -2,10 +2,17 @@ import type { SystemLinkPeer, PlainParameter, SystemLinkMessage, SystemLinkTrans
 
 export type StoredPromise<T> = [Promise<T>, (value: T) => void, (reason?: any) => void];
 
+export type StreamSink = {
+    push: (value: SystemLinkParameter) => void;
+    close: () => void;
+    error: (err: string) => void;
+};
+
 export class CoreSystemLinkPeer implements SystemLinkPeer {
     #functions: Record<string, (...args: PlainParameter[]) => Promise<PlainParameter | void>> = {};
     #transport: SystemLinkTransport | null = null;
     #promises: Record<number, StoredPromise<SystemLinkParameter>> = {};
+    #streams: Record<number, StreamSink> = {};
     #usedIds = new Set<number>();
 
     async start(): Promise<void> {
@@ -27,6 +34,35 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
         if (Array.isArray(arg)) {
             return { literal: arg.map(item => this.#handleOutgoingArg(item)) };
         }
+        if (arg !== null && typeof arg === "object" && Symbol.asyncIterator in arg) {
+            const streamId = this.#genId();
+            // Pump the iterable in the background
+            (async () => {
+                try {
+                    for await (const value of arg as AsyncIterable<PlainParameter>) {
+                        await this.#transport?.send({
+                            id: streamId,
+                            type: "stream",
+                            value: this.#handleOutgoingArg(value)
+                        });
+                    }
+                    await this.#transport?.send({
+                        id: streamId,
+                        type: "stream",
+                        done: true
+                    });
+                } catch (e) {
+                    await this.#transport?.send({
+                        id: streamId,
+                        type: "stream",
+                        err: e instanceof Error ? e.message : String(e)
+                    });
+                } finally {
+                    this.#usedIds.delete(streamId);
+                }
+            })();
+            return { stream: streamId };
+        }
         if (typeof arg === "object") {
             const result: Record<string, SystemLinkParameter> = {};
             for (const [key, value] of Object.entries(arg)) {
@@ -36,11 +72,7 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
         }
         if (typeof arg === "function") {
             const methodId = `__method_${Math.random().toString(36).slice(2)}`;
-            // store a function that uses PlainParameter interface (the user-facing interface)
             this.storeFunction(methodId, async (...plainArgs: PlainParameter[]) => {
-                // when remote invokes this function, it'll be called with PlainParameters
-                // return whatever the original function would return (PlainParameter | void)
-                // Note: the caller (message handler) will serialize the returned PlainParameter for transport.
                 const res = await (arg as (...args: PlainParameter[]) => Promise<PlainParameter | void>)(...plainArgs);
                 return res;
             });
@@ -51,6 +83,84 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
 
     #systemLinkToPlain(param: SystemLinkParameter): PlainParameter {
         if (param === undefined) return undefined as any;
+        if ("stream" in param) {
+            const streamId = param.stream;
+            // Build an AsyncIterable backed by a queue fed by incoming stream messages
+            const queue: Array<{ value?: SystemLinkParameter; done?: boolean; err?: string }> = [];
+            let notify: (() => void) | null = null;
+
+            this.#streams[streamId] = {
+                push: (value: SystemLinkParameter) => {
+                    queue.push({ value });
+                    notify?.();
+                },
+                close: () => {
+                    queue.push({ done: true });
+                    notify?.();
+                },
+                error: (err: string) => {
+                    queue.push({ err });
+                    notify?.();
+                }
+            };
+
+            const iterable: AsyncIterable<PlainParameter> = {
+                [Symbol.asyncIterator]() {
+                    return {
+                        next(): Promise<IteratorResult<PlainParameter>> {
+                            const consume = (): Promise<IteratorResult<PlainParameter>> => {
+                                if (queue.length > 0) {
+                                    const item = queue.shift()!;
+                                    if (item.done) {
+                                        return Promise.resolve({ value: undefined, done: true });
+                                    }
+                                    if (item.err) {
+                                        return Promise.reject(new Error(item.err));
+                                    }
+                                    // item.value needs to be resolved in peer context — 
+                                    // we capture the peer ref via closure below
+                                    return Promise.resolve({ value: item.value, done: false });
+                                }
+                                return new Promise<IteratorResult<PlainParameter>>((res, rej) => {
+                                    notify = () => {
+                                        notify = null;
+                                        consume().then(res, rej);
+                                    };
+                                });
+                            };
+                            return consume();
+                        },
+                        return(): Promise<IteratorResult<PlainParameter>> {
+                            delete (this as any).#streams?.[streamId];
+                            return Promise.resolve({ value: undefined, done: true });
+                        }
+                    };
+                }
+            };
+
+            // We need peer context to deserialize values — wrap with deserialization
+            const peer = this;
+            return {
+                [Symbol.asyncIterator]() {
+                    const inner = iterable[Symbol.asyncIterator]();
+                    return {
+                        async next(): Promise<IteratorResult<PlainParameter>> {
+                            const result = await inner.next();
+                            if (result.done) return { value: undefined, done: true };
+                            // result.value is still a raw SystemLinkParameter here
+                            return {
+                                value: peer.#systemLinkToPlain(result.value as SystemLinkParameter),
+                                done: false
+                            };
+                        },
+                        return(): Promise<IteratorResult<PlainParameter>> {
+                            delete peer.#streams[streamId];
+                            return Promise.resolve({ value: undefined, done: true });
+                        }
+                    };
+                }
+            };
+        }
         if ("literal" in param) {
             const lit = param.literal;
             if (typeof lit === "string" || typeof lit === "number" || typeof lit === "boolean" || lit === null) {
@@ -66,8 +176,8 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
                 }
                 return obj;
             }
-        } else if ("method" in param) {
-            // return a function that calls the remote method and converts the result to PlainParameter
+        }
+        if ("method" in param) {
             return (...params: PlainParameter[]) => {
                 return this.callRemote(param.method, params) as unknown as Promise<any>;
             };
@@ -88,6 +198,21 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
     }
 
     #handleMessage = async (message: SystemLinkMessage): Promise<void> => {
+        if (message.type === "stream") {
+            const sink = this.#streams[message.id];
+            if (!sink) return; // stream was abandoned
+            if (message.err) {
+                sink.error(message.err);
+                delete this.#streams[message.id];
+            } else if (message.done) {
+                sink.close();
+                delete this.#streams[message.id];
+            } else {
+                sink.push(message.value);
+            }
+            return;
+        }
+
         if (message.type === "call") {
             const func = this.#functions[message.method];
             if (func) {
@@ -114,7 +239,6 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
                 }
             }
         } else if (message.type === "response") {
-            // response.ok is a SystemLinkParameter when success, otherwise err is present
             const value = message.success ? (message.ok as SystemLinkParameter) : { literal: message.err };
             this.#resolvePromise(message.id, value);
         }
@@ -169,14 +293,14 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
     async callRemote(method: string, params: PlainParameter[]): Promise<PlainParameter> {
         if (!this.#transport) throw new Error("Transport not set");
         const id = this.#genId();
-        this.#transport.send({id, type: "call", method, params: params.map(p => this.#handleOutgoingArg(p))});
+        this.#transport.send({ id, type: "call", method, params: params.map(p => this.#handleOutgoingArg(p)) });
         this.#createPromise(id);
         try {
-            const result = await this.#promises[id][0]; // SystemLinkParameter
+            const result = await this.#promises[id][0];
             return this.#systemLinkToPlain(result);
         } finally {
             this.#deletePromise(id);
         }
     }
-    
+
 }
