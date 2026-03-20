@@ -1,71 +1,77 @@
-import { FileSystemCoreComponent, FileSystemLocalComponent, FileSystemReadOnlyComponent } from "@openv-project/openv-api";
-import { createPostMessageTransport, ProcessExecutor, ProcessSpawnContext } from "../../mod.ts"
+import { FileSystemCoreComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, ProcessComponent } from "@openv-project/openv-api";
+import { CoreFSExt, CoreProcessExt, CoreSystemLinkPeer, createPostMessageTransport, ProcessScopedFS, ProcessScopedProcess, ProcessSpawnContext } from "../../mod.ts";
 
-export type EnvironmentBuilder<T extends FileSystemCoreComponent & FileSystemReadOnlyComponent, U extends FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemLocalComponent> = (sys: T, ctx: ProcessSpawnContext) => Promise<U>;
+export type ProcessEnvBuilder = (ctx: ProcessSpawnContext) => Promise<Record<string, Function>>;
 
-export class WebExecutor<T extends FileSystemCoreComponent & FileSystemReadOnlyComponent> implements ProcessExecutor {
-    #sys: T;
-    #environmentBuilder: EnvironmentBuilder<T, FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemLocalComponent>;
-    #workers: Map<number, Worker> = new Map();
+export async function registerWebExecutor(
+    system: FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemReadWriteComponent & FileSystemPipeComponent & CoreFSExt & ProcessComponent & CoreProcessExt,
+    buildEnv: ProcessEnvBuilder
+): Promise<void> {
+    const workers = new Map<number, Worker>();
 
-    constructor(sys: T, environmentBuilder: EnvironmentBuilder<T, FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemLocalComponent>) {
-        this.#sys = sys;
-        this.#environmentBuilder = environmentBuilder;
-    }
+    await system["party.openv.impl.process.onSpawn"](async (ctx) => {
+        try {
+            const worker = new Worker(
+                `/@${ctx.exe}?pid=${ctx.pid}`,
+                { type: "module" }
+            );
+            workers.set(ctx.pid, worker);
 
-    async run(ctx: ProcessSpawnContext): Promise<void> {
-        const newSys = await this.#environmentBuilder(this.#sys, ctx);
-        if (!newSys) {
-            throw new Error("Failed to build environment");
-        }
+            const env = await buildEnv(ctx);
 
-        const size = (await this.#sys["party.openv.filesystem.read.stat"](ctx.exe)).size;
-        const fd = await this.#sys["party.openv.filesystem.open"](ctx.exe, "r");
-        if (fd < 0) {
-            throw new Error("Failed to open file");
-        }
+            const localEndpoint = {
+                postMessage(_msg: any) { },
+                addEventListener(_type: "message", handler: (ev: MessageEvent) => void) {
+                    worker.addEventListener("message", handler);
+                },
+                removeEventListener(_type: "message", handler: (ev: MessageEvent) => void) {
+                    worker.removeEventListener("message", handler);
+                },
+            };
+            const remoteEndpoint = {
+                postMessage(msg: any) { worker.postMessage(msg); },
+            };
 
-        const buffer = new Uint8Array(size);
+            const transport = createPostMessageTransport(
+                localEndpoint, remoteEndpoint, `openv-process-${ctx.pid}`
+            );
 
-        let offset = 0;
-        while (offset < size) {
-            const chunkSize = Math.min(1024, size - offset);
-            const bytesRead = await this.#sys["party.openv.filesystem.read.read"](fd, buffer, offset, chunkSize);
-            if (bytesRead <= 0) {
-                throw new Error("Failed to read file");
+            const peer = new CoreSystemLinkPeer();
+            for (const [name, fn] of Object.entries(env)) {
+                peer.storeFunction(name, fn as any);
             }
-            offset += bytesRead;
+            peer.setTransport(transport);
+            await peer.start();
+
+            const cleanupWorker = (reason: string) => {
+                const w = workers.get(ctx.pid);
+                if (!w) return;
+                w.terminate();
+                workers.delete(ctx.pid);
+                peer.stop().catch(() => { });
+            };
+
+            worker.addEventListener("message", () => { });
+
+            worker.addEventListener("error", async (e) => {
+                console.error(`[executor] pid=${ctx.pid} worker error:`, e.message);
+                cleanupWorker("error");
+                await system["party.openv.impl.process.exitProcess"](ctx.pid, 1).catch(() => { });
+            });
+
+            worker.addEventListener("messageerror", async (e) => {
+                console.error(`[executor] pid=${ctx.pid} worker messageerror:`, e);
+                cleanupWorker("messageerror");
+                await system["party.openv.impl.process.exitProcess"](ctx.pid, 1).catch(() => { });
+            });
+
+            system["party.openv.process.wait"](ctx.pid).then(() => {
+                cleanupWorker("process exited");
+            })
+
+        } catch (err) {
+            console.error(`[executor] pid=${ctx.pid} failed to spawn:`, err);
+            await system["party.openv.impl.process.exitProcess"](ctx.pid, null).catch(() => { });
         }
-
-        await this.#sys["party.openv.filesystem.close"](fd);
-
-        const decoder = new TextDecoder();
-        const code = decoder.decode(buffer);
-
-        console.log(`Executing process ${ctx.exe} with code:\n${code}`);
-
-        const worker = new Worker(URL.createObjectURL(new Blob([code], { type: "application/javascript" })));
-
-        this.#workers.set(ctx.pid, worker);
-
-        const tp = createPostMessageTransport(
-            worker,
-            worker,
-            `openv-process-${ctx.pid}`
-        );
-        tp.start();
-    }
-
-    destroy(pid: number): Promise<void> {
-        const worker = this.#workers.get(pid);
-        if (worker) {
-            worker.terminate();
-            this.#workers.delete(pid);
-        }
-        return Promise.resolve();
-    }
-
-    setEnvironmentBuilder(builder: EnvironmentBuilder<T, FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemLocalComponent>): void {
-        this.#environmentBuilder = builder;
-    }
+    });
 }

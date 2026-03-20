@@ -31,6 +31,24 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
         if (typeof arg === "string" || typeof arg === "number" || typeof arg === "boolean" || arg === null) {
             return { literal: arg };
         }
+        if (
+            arg instanceof Uint8Array ||
+            arg instanceof Uint8ClampedArray ||
+            arg instanceof Uint16Array ||
+            arg instanceof Uint32Array ||
+            arg instanceof Int8Array ||
+            arg instanceof Int16Array ||
+            arg instanceof Int32Array ||
+            arg instanceof Float32Array ||
+            arg instanceof Float64Array ||
+            arg instanceof BigInt64Array ||
+            arg instanceof BigUint64Array ||
+            arg instanceof ArrayBuffer ||
+            arg instanceof DataView ||
+            arg instanceof Blob
+        ) {
+            return { literal: arg };
+        }
         if (Array.isArray(arg)) {
             return { literal: arg.map(item => this.#handleOutgoingArg(item)) };
         }
@@ -78,6 +96,9 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
             });
             return { method: methodId };
         }
+        if (arg === undefined) {
+            return undefined;
+        }
         throw new Error(`Unsupported argument type: ${typeof arg}`);
     }
 
@@ -117,8 +138,6 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
                                     if (item.err) {
                                         return Promise.reject(new Error(item.err));
                                     }
-                                    // item.value needs to be resolved in peer context — 
-                                    // we capture the peer ref via closure below
                                     return Promise.resolve({ value: item.value, done: false });
                                 }
                                 return new Promise<IteratorResult<PlainParameter>>((res, rej) => {
@@ -138,7 +157,6 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
                 }
             };
 
-            // We need peer context to deserialize values — wrap with deserialization
             const peer = this;
             return {
                 [Symbol.asyncIterator]() {
@@ -164,6 +182,24 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
         if ("literal" in param) {
             const lit = param.literal;
             if (typeof lit === "string" || typeof lit === "number" || typeof lit === "boolean" || lit === null) {
+                return lit;
+            }
+            if (
+                lit instanceof Uint8Array ||
+                lit instanceof Uint8ClampedArray ||
+                lit instanceof Uint16Array ||
+                lit instanceof Uint32Array ||
+                lit instanceof Int8Array ||
+                lit instanceof Int16Array ||
+                lit instanceof Int32Array ||
+                lit instanceof Float32Array ||
+                lit instanceof Float64Array ||
+                lit instanceof BigInt64Array ||
+                lit instanceof BigUint64Array ||
+                lit instanceof ArrayBuffer ||
+                lit instanceof DataView ||
+                lit instanceof Blob
+            ) {
                 return lit;
             }
             if (Array.isArray(lit)) {
@@ -198,6 +234,20 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
     }
 
     #handleMessage = async (message: SystemLinkMessage): Promise<void> => {
+        if (message.type === "enumerate") {
+            await this.#transport?.send({
+                id: message.id,
+                type: "enumerate_response",
+                methods: Object.keys(this.#functions),
+            });
+            return;
+        }
+
+        if (message.type === "enumerate_response") {
+            this.#resolvePromise(message.id, { literal: message.methods as any });
+            return;
+        }
+
         if (message.type === "stream") {
             const sink = this.#streams[message.id];
             if (!sink) return; // stream was abandoned
@@ -237,6 +287,14 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
                 } finally {
                     this.#usedIds.delete(message.id);
                 }
+            } else {
+                const response: SystemLinkMessage = {
+                    id: message.id,
+                    type: "response",
+                    success: false,
+                    err: `Method not found: ${message.method}`
+                };
+                this.#transport?.send(response);
             }
         } else if (message.type === "response") {
             const value = message.success ? (message.ok as SystemLinkParameter) : { literal: message.err };
@@ -303,4 +361,16 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
         }
     }
 
+    async enumerateRemote(): Promise<string[]> {
+        if (!this.#transport) throw new Error("Transport not set");
+        const id = this.#genId();
+        this.#createPromise(id);
+        await this.#transport.send({ id, type: "enumerate" });
+        try {
+            const result = await this.#promises[id][0];
+            return (result as any).literal as string[];
+        } finally {
+            this.#deletePromise(id);
+        }
+    }
 }

@@ -1,7 +1,24 @@
-export type PlainParameter = string | number | boolean | { [key: string]: PlainParameter } | PlainParameter[] | ((...args: PlainParameter[]) => Promise<PlainParameter>) | AsyncIterable<PlainParameter> | void | null | undefined;
+export type PlainParameter = string | number | boolean | { [key: string]: PlainParameter } | PlainParameter[] | ((...args: PlainParameter[]) => Promise<PlainParameter>) | AsyncIterable<PlainParameter> | BinaryData | void | null | undefined;
+
+export type BinaryData =
+    | Uint8Array
+    | Uint8ClampedArray
+    | Uint16Array
+    | Uint32Array
+    | Int8Array
+    | Int16Array
+    | Int32Array
+    | Float32Array
+    | Float64Array
+    | BigInt64Array
+    | BigUint64Array
+    | ArrayBuffer
+    | DataView
+    | Blob;
+
 
 export type SystemLinkParameter = {
-    literal: string | number | boolean | { [key: string]: SystemLinkParameter } | SystemLinkParameter[] | null;
+    literal: string | number | boolean | { [key: string]: SystemLinkParameter } | SystemLinkParameter[] | BinaryData | null;
 } | {
     method: string;
 } | { stream: number }
@@ -34,9 +51,18 @@ export type SystemLinkResponse = {
     type: "response";
 } & (SystemLinkResponseSuccess | SystemLinkResponseFailure);
 
+export type SystemLinkEnumerate = {
+    type: "enumerate";
+};
+
+export type SystemLinkEnumerateResponse = {
+    type: "enumerate_response";
+    methods: string[];
+};
+
 export type SystemLinkMessage = {
     id: number;
-} & (SystemLinkCall | SystemLinkResponse | SystemLinkStreamChunk);
+} & (SystemLinkCall | SystemLinkResponse | SystemLinkStreamChunk | SystemLinkEnumerate | SystemLinkEnumerateResponse);
 
 export type SystemLinkTransport = {
     send(message: SystemLinkMessage): Promise<void>;

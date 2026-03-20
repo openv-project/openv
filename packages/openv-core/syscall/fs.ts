@@ -1,12 +1,12 @@
 import { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemVirtualComponent, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, SystemComponent } from "@openv-project/openv-api"
 
-type VFS = {
+type vfs = {
     mount: (path: string) => Promise<void>;
     unmount: (path: string) => Promise<void>;
     open: (path: string, ofd: number, flags: OpenFlags, mode: FileMode) => Promise<void>;
     create: (path: string, mode?: FileMode) => Promise<void>;
     close: (ofd: number) => Promise<void>;
-    read: (ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number) => Promise<number>;
+    read: (ofd: number, length: number, position?: number) => Promise<Uint8Array>;
     write: (ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null) => Promise<number>;
     stat: (path: string) => Promise<FsStats>;
     readdir: (path: string) => Promise<string[]>;
@@ -30,7 +30,7 @@ export interface CoreFSExt extends SystemComponent<typeof CORE_FS_EXT_NAMESPACE_
     /**
      * Read from a file using OFD.
      */
-    ["party.openv.impl.filesystem.readByOfd"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number): Promise<number>;
+    ["party.openv.impl.filesystem.readByOfd"](ofd: number, length: number, position?: number): Promise<Uint8Array>;
 
     /**
      * Write to a file using OFD.
@@ -75,11 +75,16 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         }
         provider.create = handler;
     }
+
     async ["party.openv.filesystem.write.write"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<number> {
-        const entry = this.#ofdTable.get(ofd);
-        if (!entry) {
-            throw new Error(`Invalid open file number ${ofd}`);
+        // Check pipe table first
+        const pipeInfo = this.#ofdToPipe.get(ofd);
+        if (pipeInfo && pipeInfo.role === "write") {
+            return this.#pipeWrite(pipeInfo.pipeId, buffer, offset, length);
         }
+
+        const entry = this.#ofdTable.get(ofd);
+        if (!entry) throw new Error(`Invalid open file number ${ofd}`);
         if (!entry.provider || typeof entry.provider.write !== "function") {
             throw new Error(`Open file number ${ofd} is not backed by a provider that supports write.`);
         }
@@ -209,16 +214,21 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         return provider.stat(subpath);
     }
 
-    async ["party.openv.filesystem.read.read"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number): Promise<number> {
-        const entry = this.#ofdTable.get(ofd);
-        if (!entry) {
-            throw new Error(`Invalid open file number ${ofd}`);
+    async ["party.openv.filesystem.read.read"](ofd: number, length: number, position?: number): Promise<Uint8Array> {
+        // Check pipe table first
+        const pipeInfo = this.#ofdToPipe.get(ofd);
+        if (pipeInfo && pipeInfo.role === "read") {
+            return this.#pipeRead(pipeInfo.pipeId, length);
         }
+
+        const entry = this.#ofdTable.get(ofd);
+        if (!entry) throw new Error(`Invalid open file number ${ofd}`);
         if (!entry.provider || typeof entry.provider.read !== "function") {
             throw new Error(`Open file number ${ofd} is not backed by a provider that supports read.`);
         }
-        return entry.provider.read(ofd, buffer, offset, length, position);
+        return entry.provider.read(ofd, length, position);
     }
+
 
     async ["party.openv.filesystem.read.readdir"](path: string): Promise<string[]> {
         const resolved = this.#resolveMountPath(path);
@@ -252,7 +262,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     #ofdTable: Map<number, {
         path: string;
         providerId?: string;
-        provider?: Partial<VFS>;
+        provider?: Partial<vfs>;
         flags: OpenFlags;
         mode: FileMode;
     }> = new Map();
@@ -320,13 +330,13 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         const vfs = this.#getVfs(id);
         vfs.open = handler;
     }
-    
+
     /**
      * This object is populated with vfs providers. When `party.openv.filesystem.virtual.create` is called, an empty
      * but named partial vfs object is created. The `party.openv.filesystem.virtual.on*` functions register the
      * corresponding function on the vfs object.
      */
-    #vfsTable: Map<string, Partial<VFS>> = new Map();
+    #vfsTable: Map<string, Partial<vfs>> = new Map();
 
     async ["party.openv.filesystem.virtual.create"](id: string): Promise<void> {
         if (this.#vfsTable.has(id)) {
@@ -357,7 +367,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         vfs.close = handler;
     }
 
-    async ["party.openv.filesystem.virtual.onread"](id: string, handler: (fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number) => Promise<number>): Promise<void> {
+    async ["party.openv.filesystem.virtual.onread"](id: string, handler: (ofd: number, length: number, position?: number) => Promise<Uint8Array>): Promise<void> {
         const vfs = this.#getVfs(id);
         vfs.read = handler;
     }
@@ -397,9 +407,9 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
      */
     #pipeTable: Map<number, {
         buffer: Uint8Array;
-        /** Write cursor — how many bytes have been written into the buffer. */
+        /** Write cursor: how many bytes have been written into the buffer. */
         head: number;
-        /** Read cursor — how many bytes have been consumed from the buffer. */
+        /** Read cursor: how many bytes have been consumed from the buffer. */
         tail: number;
         readClosed: boolean;
         writeClosed: boolean;
@@ -416,12 +426,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
      */
     #ofdToPipe: Map<number, { pipeId: number; role: "read" | "write" }> = new Map();
 
-    async ["party.openv.impl.filesystem.readByOfd"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number): Promise<number> {
+    async ["party.openv.impl.filesystem.readByOfd"](ofd: number, length: number, position?: number): Promise<Uint8Array> {
         const pipeInfo = this.#ofdToPipe.get(ofd);
         if (pipeInfo && pipeInfo.role === "read") {
-            return this.#pipeRead(pipeInfo.pipeId, buffer, offset, length);
+            return this.#pipeRead(pipeInfo.pipeId, length);
         }
-        return this["party.openv.filesystem.read.read"](ofd, buffer, offset, length, position);
+        return this["party.openv.filesystem.read.read"](ofd, length, position);
     }
 
     async ["party.openv.impl.filesystem.writeByOfd"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<number> {
@@ -489,24 +499,21 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         return [readOfd, writeOfd];
     }
 
-    async #pipeRead(pipeId: number, buffer: Uint8Array, offset?: number, length?: number): Promise<number> {
+    async #pipeRead(pipeId: number, length: number): Promise<Uint8Array> {
         const pipe = this.#pipeTable.get(pipeId);
         if (!pipe) throw new Error(`Pipe ${pipeId} does not exist.`);
-
-        const dstOffset = offset ?? 0;
-        const maxRead = length ?? (buffer.length - dstOffset);
 
         while (pipe.head === pipe.tail && !pipe.writeClosed) {
             await new Promise<void>(resolve => pipe.pendingReaders.push(resolve));
         }
 
         if (pipe.head === pipe.tail && pipe.writeClosed) {
-            return 0;
+            return new Uint8Array(0);
         }
 
         const available = pipe.head - pipe.tail;
-        const toRead = Math.min(maxRead, available);
-        buffer.set(pipe.buffer.subarray(pipe.tail, pipe.tail + toRead), dstOffset);
+        const toRead = Math.min(length, available);
+        const result = pipe.buffer.slice(pipe.tail, pipe.tail + toRead);
         pipe.tail += toRead;
 
         if (pipe.tail === pipe.head) {
@@ -514,11 +521,9 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             pipe.head = 0;
         }
 
-        for (const resolve of pipe.pendingWriters.splice(0)) {
-            resolve();
-        }
+        for (const resolve of pipe.pendingWriters.splice(0)) resolve();
 
-        return toRead;
+        return result;
     }
 
     async #pipeWrite(pipeId: number, buffer: Uint8Array, offset?: number, length?: number): Promise<number> {
@@ -628,9 +633,9 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     }
 
     /**
-     * Retrieves the VFS entry for the given id, throwing if it doesn't exist.
+     * Retrieves the vfs entry for the given id, throwing if it doesn't exist.
      */
-    #getVfs(id: string): Partial<VFS> {
+    #getVfs(id: string): Partial<vfs> {
         const vfs = this.#vfsTable.get(id);
         if (!vfs) {
             throw new Error(`Virtual filesystem "${id}" does not exist.`);
@@ -673,7 +678,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         }
         return { id, subpath: sub };
     }
-    
+
 }
 
 /**
@@ -720,9 +725,9 @@ export class ProcessScopedFS implements FileSystemCoreComponent, FileSystemReadO
         return this.#fs["party.openv.filesystem.read.stat"](path);
     }
 
-    async ["party.openv.filesystem.read.read"](fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number): Promise<number> {
+    async ["party.openv.filesystem.read.read"](fd: number, length: number, position?: number): Promise<Uint8Array> {
         const ofd = this.#resolveOfd(fd);
-        return this.#fs["party.openv.impl.filesystem.readByOfd"](ofd, buffer, offset, length, position);
+        return this.#fs["party.openv.impl.filesystem.readByOfd"](ofd, length, position);
     }
 
     async ["party.openv.filesystem.read.readdir"](path: string): Promise<string[]> {

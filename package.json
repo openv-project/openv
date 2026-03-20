@@ -5,17 +5,14 @@
     ],
     "license": "MIT",
     "scripts": {
-        "dev": "vite packages/openv-webos",
-        "preview": "vite preview packages/openv-webos",
-        "openv-webos:build": "vite build packages/openv-webos",
-        "build": "rollup -c && npm run build:types && npm run openv-webos:build",
-        "build:types": "tsc -p packages/openv-api/tsconfig.types.json && tsc -p packages/openv-core/tsconfig.types.json && tsc -p packages/party.openv.api.fs/tsconfig.types.json && tsc -p packages/party.openv.api.registry/tsconfig.types.json"
+        "dev": "tsx build/dev.ts",
+        "build": "tsx build/build.ts"
     },
     "devDependencies": {
-        "@rollup/plugin-node-resolve": "^16.0.3",
-        "@rollup/plugin-typescript": "^12.3.0",
-        "rollup": "^4.59.0",
-        "tslib": "^2.8.1",
+        "@types/node": "^25.5.0",
+        "esbuild": "^0.27.4",
+        "nanotar": "^0.3.0",
+        "tsx": "^4.19.0",
         "typescript": "^5.9.3"
     }
 }

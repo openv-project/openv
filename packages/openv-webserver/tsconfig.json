@@ -1,0 +1,9 @@
+{
+    "extends": "../../tsconfig.json",
+    "compilerOptions": {
+        "lib": ["webworker", "DOM", "esnext"],
+        "rootDir": ".",
+        "outDir": "../../dist-types/openv-webserver"
+    },
+    "include": ["**/*.ts"]
+}

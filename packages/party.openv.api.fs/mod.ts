@@ -11,7 +11,7 @@ export default class FsApi implements API<"party.openv.api.filesystem"> {
     if (!await this.openv.system.supports("party.openv.filesystem")) {
       throw new Error("Filesystem is not supported in this environment.");
     }
-  
+
   }
 
   async mount(id: string, path: string): Promise<void> {
@@ -44,8 +44,8 @@ export default class FsApi implements API<"party.openv.api.filesystem"> {
     await this.openv.system["party.openv.filesystem.write.create"]!(path, mode);
   }
 
-  async read(fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number): Promise<number> {
-    return await this.openv.system["party.openv.filesystem.read.read"]!(fd, buffer, offset, length, position);
+  async read(fd: number, length: number, position?: number): Promise<Uint8Array> {
+    return await this.openv.system["party.openv.filesystem.read.read"]!(fd, length, position);
   }
 
   async write(fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<number> {
@@ -64,12 +64,10 @@ export default class FsApi implements API<"party.openv.api.filesystem"> {
   }
 
   async readFile(path: string): Promise<Uint8Array> {
-    const fd = await this.open(path, "r", 0o666);
+    const stats = await this.stat(path);
+    const fd = await this.open(path, "r", 0o444);
     try {
-      const stats = await this.stat(path);
-      const buffer = new Uint8Array(stats.size);
-      await this.read(fd, buffer, 0, stats.size, 0);
-      return buffer;
+      return await this.read(fd, stats.size);
     } finally {
       await this.close(fd);
     }
@@ -92,10 +90,10 @@ export default class FsApi implements API<"party.openv.api.filesystem"> {
 
   // TODO: symlink management (waiting on syscall)
   // async symlink(target: string, path: string): Promise<void> {
-    
+
   // }
   // async readlink(path: string): Promise<string> {
-    
+
   // }
 
   async readdir(path: string): Promise<string[]> {
@@ -142,7 +140,7 @@ export default class FsApi implements API<"party.openv.api.filesystem"> {
   // async chown(path: string, uid: number, gid = uid): Promise<void> {
   // }
   // async chmod(path: string, mode: number): Promise<void> {
-    
+
   // }
 
   // TODO: path resolution (waiting on process syscalls)

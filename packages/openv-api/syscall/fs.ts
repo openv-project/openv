@@ -92,7 +92,7 @@ export interface FileSystemReadOnlyComponent extends SystemComponent<typeof FS_R
      * Read from an open file. Accepts the same kind of number that `open` returned
      * (global open file number in system environment, local fd in process environment).
      */
-    ["party.openv.filesystem.read.read"](fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number): Promise<number>;
+    ["party.openv.filesystem.read.read"](fd: number, length: number, position?: number): Promise<Uint8Array>;
     ["party.openv.filesystem.read.readdir"](path: string): Promise<string[]>;
     ["party.openv.filesystem.read.watch"](path: string, options?: { recursive?: boolean }): Promise<{
         events: AsyncIterable<FileSystemEvent>;
@@ -186,7 +186,7 @@ export interface FileSystemVirtualComponent extends SystemComponent<typeof FS_VI
     /**
      * Register a handler for reading from a file. Receives the global open file number.
      */
-    ["party.openv.filesystem.virtual.onread"](id: string, handler: (ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number) => Promise<number>): Promise<void>;
+    ["party.openv.filesystem.virtual.onread"](id: string, handler: (ofd: number, length: number, position?: number) => Promise<Uint8Array>): Promise<void>;
     /**
      * Register a handler for writing to a file. Receives the global open file number.
      */

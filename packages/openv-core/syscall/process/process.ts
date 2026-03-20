@@ -44,12 +44,9 @@ const CORE_PROCESS_EXT_NAMESPACE = "party.openv.impl.process" as const;
 const CORE_PROCESS_EXT_NAMESPACE_VERSIONED = "party.openv.impl.process/0.1.0" as const;
 
 export interface CoreProcessExt extends SystemComponent<typeof CORE_PROCESS_EXT_NAMESPACE_VERSIONED, typeof CORE_PROCESS_EXT_NAMESPACE> {
-    ["party.openv.impl.process.setExecutor"](executor: ProcessExecutor): Promise<void>;
-
+    ["party.openv.impl.process.onSpawn"](handler: (ctx: ProcessSpawnContext) => Promise<void>): Promise<void>;
     ["party.openv.impl.process.exitProcess"](pid: number, code: number | null): Promise<void>;
-
     ["party.openv.impl.process.deliverSignal"](senderPid: number, targetPid: number, signal: string): Promise<void>;
-
     ["party.openv.impl.process.getEntry"](pid: number): Promise<ProcessEntry>;
 }
 
@@ -57,124 +54,39 @@ export interface CoreProcessExt extends SystemComponent<typeof CORE_PROCESS_EXT_
 export class CoreProcess implements ProcessComponent, CoreProcessExt {
     #pidCounter = 0;
     #processTable: Map<number, ProcessEntry> = new Map();
-    #executor: ProcessExecutor | null = null;
     #fsExt: CoreFSExt | null = null;
-
-    /**
-     * Parent-side pipe fds returned after a spawn with stdio "pipe" options.
-     * Keyed by child pid. Cleaned up when the process entry is destroyed.
-     */
     #stdioResults: Map<number, SpawnStdioResult> = new Map();
+    #spawnHandler: ((ctx: ProcessSpawnContext) => Promise<void>) | null = null;
+    #spawnQueue: ProcessSpawnContext[] = [];
 
-    /**
-     * Provide a reference to the core filesystem extension so that the process
-     * manager can create pipes for stdio wiring.
-     */
     setFsExt(fsExt: CoreFSExt): void {
         this.#fsExt = fsExt;
     }
 
-    async ["party.openv.impl.process.setExecutor"](executor: ProcessExecutor): Promise<void> {
-        this.#executor = executor;
-    }
-
-    async ["party.openv.impl.process.exitProcess"](pid: number, code: number | null): Promise<void> {
-        const entry = this.#processTable.get(pid);
-        if (!entry) return;
-        entry.running = false;
-        entry.exitCode = code;
-        for (const resolve of entry.waiters) {
-            resolve(code);
-        }
-        entry.waiters = [];
-    }
-
-    async ["party.openv.impl.process.deliverSignal"](senderPid: number, targetPid: number, signal: string): Promise<void> {
-        if (targetPid === 0) {
-            // PID 0 is the target for signals that affect the system's process management
-            if (signal === PROCESS_SIGNAL_NOTIFYEXIT) {
-                // Fully destroy the sender process and free the pid
-                const entry = this.#processTable.get(senderPid);
-                if (entry) {
-                    entry.running = false;
-                    for (const resolve of entry.waiters) {
-                        resolve(entry.exitCode);
-                    }
-                    entry.waiters = [];
-                    this.#processTable.delete(senderPid);
-                    this.#stdioResults.delete(senderPid);
-                    // Allow the executor to perform cleanup
-                    if (this.#executor) {
-                        await this.#executor.destroy(senderPid).catch(() => {
-                            // ignore executor cleanup errors
-                        });
-                    }
-                }
-            }
-            return;
-        }
-
-        const entry = this.#getEntry(targetPid);
-        if (!entry.running) {
-            throw new Error(`Process ${targetPid} is not running.`);
-        }
-
-        if (signal === PROCESS_SIGNAL_NOTIFYEXIT) {
-            for (const resolve of entry.waiters) {
-                resolve(entry.exitCode);
-            }
-            entry.waiters = [];
-            return;
-        }
-
-        const handler = entry.signalHandlers.get(signal);
-        if (handler) {
-            const sender = this.#processTable.get(senderPid);
-            await handler({
-                signal,
-                uid: sender?.uid ?? 0,
-                gid: sender?.gid ?? 0,
-                pid: senderPid,
+    async ["party.openv.impl.process.onSpawn"](handler: (ctx: ProcessSpawnContext) => Promise<void>): Promise<void> {
+        this.#spawnHandler = handler;
+        // Flush anything queued before the handler registered
+        for (const ctx of this.#spawnQueue.splice(0)) {
+            this.#spawnHandler(ctx).catch(() => {
+                this["party.openv.impl.process.exitProcess"](ctx.pid, null);
             });
         }
-    }
-
-    async ["party.openv.impl.process.getEntry"](pid: number): Promise<ProcessEntry> {
-        return this.#getEntry(pid);
-    }
-
-    #getEntry(pid: number): ProcessEntry {
-        const entry = this.#processTable.get(pid);
-        if (!entry) {
-            throw new Error(`No process with pid ${pid}.`);
-        }
-        return entry;
-    }
-
-    #allocatePid(entry: Omit<ProcessEntry, "pid" | "waiters" | "running" | "exitCode" | "signalHandlers">): number {
-        const pid = ++this.#pidCounter;
-        this.#processTable.set(pid, {
-            ...entry,
-            pid,
-            waiters: [],
-            running: true,
-            exitCode: null,
-            signalHandlers: new Map(),
-        });
-        return pid;
     }
 
     async ["party.openv.process.spawn"](
         command: string,
         args?: string[],
-        options?: { env?: Record<string, string>; cwd?: string; uid?: number; gid?: number; ppid?: number; stdio?: [stdin?: StdioOption, stdout?: StdioOption, stderr?: StdioOption] }
+        options?: {
+            env?: Record<string, string>;
+            cwd?: string;
+            uid?: number;
+            gid?: number;
+            ppid?: number;
+            stdio?: [stdin?: StdioOption, stdout?: StdioOption, stderr?: StdioOption];
+        }
     ): Promise<number> {
-        // In the system environment all options are mandatory per spec.
         if (options?.cwd === undefined || options?.env === undefined) {
             throw new Error("cwd and env are mandatory when spawning from the system environment.");
-        }
-        if (!this.#executor) {
-            throw new Error("No process executor has been set. Call party.openv.impl.process.setExecutor first.");
         }
 
         const pid = this.#allocatePid({
@@ -210,16 +122,25 @@ export class CoreProcess implements ProcessComponent, CoreProcessExt {
             }
         }
 
-        if (stdioResult.stdin !== undefined || stdioResult.stdout !== undefined || stdioResult.stderr !== undefined) {
+        if (
+            stdioResult.stdin !== undefined ||
+            stdioResult.stdout !== undefined ||
+            stdioResult.stderr !== undefined
+        ) {
             this.#stdioResults.set(pid, stdioResult);
         }
 
         const entry = this.#getEntry(pid);
         const ctx: ProcessSpawnContext = { ...entry, env: { ...entry.env }, stdioOfds };
 
-        this.#executor.run(ctx).catch(() => {
-            this["party.openv.impl.process.exitProcess"](pid, null);
-        });
+        if (this.#spawnHandler) {
+            this.#spawnHandler(ctx).catch((e) => {
+                this["party.openv.impl.process.exitProcess"](pid, null);
+                console.warn(`Spawn handler for pid=${pid} threw an error:`, e);
+            });
+        } else {
+            this.#spawnQueue.push(ctx);
+        }
 
         return pid;
     }
@@ -292,18 +213,91 @@ export class CoreProcess implements ProcessComponent, CoreProcessExt {
         return { ppid, uid, gid, cwd, args, exe, env: { ...env } };
     }
 
+    async ["party.openv.impl.process.exitProcess"](pid: number, code: number | null): Promise<void> {
+        const entry = this.#processTable.get(pid);
+        if (!entry) return;
+        entry.running = false;
+        entry.exitCode = code;
+        for (const resolve of entry.waiters) {
+            resolve(code);
+        }
+        entry.waiters = [];
+    }
+
+    async ["party.openv.impl.process.deliverSignal"](senderPid: number, targetPid: number, signal: string): Promise<void> {
+        if (targetPid === 0) {
+            if (signal === PROCESS_SIGNAL_NOTIFYEXIT) {
+                const entry = this.#processTable.get(senderPid);
+                if (entry) {
+                    entry.running = false;
+                    for (const resolve of entry.waiters) {
+                        resolve(entry.exitCode);
+                    }
+                    entry.waiters = [];
+                    this.#processTable.delete(senderPid);
+                    this.#stdioResults.delete(senderPid);
+                }
+            }
+            return;
+        }
+
+        const entry = this.#getEntry(targetPid);
+        if (!entry.running) {
+            throw new Error(`Process ${targetPid} is not running.`);
+        }
+
+        if (signal === PROCESS_SIGNAL_NOTIFYEXIT) {
+            for (const resolve of entry.waiters) {
+                resolve(entry.exitCode);
+            }
+            entry.waiters = [];
+            return;
+        }
+
+        const handler = entry.signalHandlers.get(signal);
+        if (handler) {
+            const sender = this.#processTable.get(senderPid);
+            await handler({
+                signal,
+                uid: sender?.uid ?? 0,
+                gid: sender?.gid ?? 0,
+                pid: senderPid,
+            });
+        }
+    }
+
+    async ["party.openv.impl.process.getEntry"](pid: number): Promise<ProcessEntry> {
+        return this.#getEntry(pid);
+    }
+
+    #getEntry(pid: number): ProcessEntry {
+        const entry = this.#processTable.get(pid);
+        if (!entry) throw new Error(`No process with pid ${pid}.`);
+        return entry;
+    }
+
+    #allocatePid(entry: Omit<ProcessEntry, "pid" | "waiters" | "running" | "exitCode" | "signalHandlers">): number {
+        const pid = ++this.#pidCounter;
+        this.#processTable.set(pid, {
+            ...entry,
+            pid,
+            waiters: [],
+            running: true,
+            exitCode: null,
+            signalHandlers: new Map(),
+        });
+        return pid;
+    }
+
     supports(ns: typeof PROCESS_NAMESPACE_VERSIONED | typeof PROCESS_NAMESPACE): Promise<typeof PROCESS_NAMESPACE_VERSIONED>;
     supports(ns: typeof CORE_PROCESS_EXT_NAMESPACE_VERSIONED | typeof CORE_PROCESS_EXT_NAMESPACE): Promise<typeof CORE_PROCESS_EXT_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
-        if (ns === PROCESS_NAMESPACE || ns === PROCESS_NAMESPACE_VERSIONED) {
-            return PROCESS_NAMESPACE_VERSIONED;
-        }
-        if (ns === CORE_PROCESS_EXT_NAMESPACE || ns === CORE_PROCESS_EXT_NAMESPACE_VERSIONED) {
-            return CORE_PROCESS_EXT_NAMESPACE_VERSIONED;
-        }
+        if (ns === PROCESS_NAMESPACE || ns === PROCESS_NAMESPACE_VERSIONED) return PROCESS_NAMESPACE_VERSIONED;
+        if (ns === CORE_PROCESS_EXT_NAMESPACE || ns === CORE_PROCESS_EXT_NAMESPACE_VERSIONED) return CORE_PROCESS_EXT_NAMESPACE_VERSIONED;
         return null;
     }
 }
+
 
 export class ProcessScopedProcess implements ProcessComponent, ProcessLocalComponent {
 

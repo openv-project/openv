@@ -2,10 +2,9 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "rootDir": "..",
-    "outDir": "../../dist/party.openv.api.fs"
+    "outDir": "../../dist-types/party.openv.api.fs"
   },
   "include": [
     "**/*.ts",
-    "../openv-api/**/*.ts"
   ]
 }

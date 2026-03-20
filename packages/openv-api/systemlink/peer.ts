@@ -9,4 +9,5 @@ export interface SystemLinkPeer {
 
     // Call a function
     callRemote(method: string, params: PlainParameter[]): Promise<PlainParameter>;
+    enumerateRemote(): Promise<string[]>;
 }

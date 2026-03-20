@@ -96,18 +96,36 @@ export class CoreOpEnv implements OpEnv<RegistryReadComponent & RegistryWriteCom
 export class ClientOpEnv<T extends SystemComponent<any, any>> implements OpEnv<T> {
     #api: { [key: string]: API } = {};
     #peer: CoreSystemLinkPeer;
-    
+    #methods: string[] = [];
+
     constructor(transport?: SystemLinkTransport) {
         this.#peer = new CoreSystemLinkPeer();
         if (transport) this.#peer.setTransport(transport);
         this.#peer.start();
     }
 
+    async enumerateRemote(): Promise<void> {
+        this.#methods = await this.#peer.enumerateRemote();
+    }
+
     #peerProxy: T = new Proxy({} as T, {
         get: (_t, prop, _r) => {
+            if (prop === Symbol.iterator || prop === Symbol.toPrimitive) return undefined;
             return (...args: PlainParameter[]) => {
                 return this.#peer.callRemote(prop.toString(), args);
+            };
+        },
+        ownKeys: (_t) => {
+            return this.#methods;
+        },
+        getOwnPropertyDescriptor: (_t, prop) => {
+            if (this.#methods.includes(prop as string)) {
+                return { enumerable: true, configurable: true, writable: true };
             }
+            return undefined;
+        },
+        has: (_t, prop) => {
+            return this.#methods.includes(prop as string);
         }
     });
 

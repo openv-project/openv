@@ -32,7 +32,7 @@ export default class RegistryApi implements API<"party.openv.api.registry"> {
     this.openv = openv;
     if (!await this.openv.system.supports(REGISTRY_READ_NAMESPACE)) {
       throw new Error("Registry is not supported in this environment.");
-    }  
+    }
   }
 
   async readEntry(key: string, entry: string): Promise<RegistryValue | null> {
@@ -42,7 +42,6 @@ export default class RegistryApi implements API<"party.openv.api.registry"> {
 
   async readDefault(key: string): Promise<RegistryValue | null> {
     if (!await this.openv.system.supports(REGISTRY_READ_NAMESPACE)) throw new Error("Registry is not supported in this environment.");
-    console.log("Reading default value for key:", key);
     return await (this.openv.system["party.openv.registry.read.readDefault"] as any)(key);
   }
 
@@ -106,20 +105,20 @@ export default class RegistryApi implements API<"party.openv.api.registry"> {
     const [defaultValue, rawEntries, rawSubkeys] = await Promise.all([
       unresolved.default,
       unresolved.entries,
-      unresolved.subkeys, 
+      unresolved.subkeys,
     ]);
-  
+
     const entries = await Promise.all(
       Object.entries(rawEntries).map(async ([k, v]) => [k, await v] as const)
     );
-  
+
     const subkeys = await Promise.all(
       Object.entries(rawSubkeys).map(async ([k, v]) => [
         k,
         await this.#resolveRegKey(v)
       ] as const)
     );
-  
+
     return {
       default: defaultValue,
       entries: Object.fromEntries(entries),
@@ -148,7 +147,7 @@ export default class RegistryApi implements API<"party.openv.api.registry"> {
     if (!await this.openv.system["party.openv.registry.read.keyExists"](key)) {
       throw new Error(`Key ${key} does not exist.`);
     }
-    
+
     const data: RegistryFile = {
       meta: {
         key,

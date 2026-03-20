@@ -34,7 +34,7 @@ export class TmpFs {
     // Register our vfs implementation with the system.
     async register(system: FileSystemVirtualComponent) {
         system["party.openv.filesystem.virtual.create"](TMPFS_NAMESPACE);
-        system["party.openv.filesystem.virtual.onstat"](TMPFS_NAMESPACE, 
+        system["party.openv.filesystem.virtual.onstat"](TMPFS_NAMESPACE,
             async (path: string) => await this.stat(normalizePath(path))
         );
         system["party.openv.filesystem.virtual.onreaddir"](TMPFS_NAMESPACE,
@@ -59,7 +59,7 @@ export class TmpFs {
             async (fd: number) => await this.close(fd)
         );
         system["party.openv.filesystem.virtual.onread"](TMPFS_NAMESPACE,
-            async (fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number) => await this.read(fd, buffer, offset, length, position)
+            async (fd: number, length: number, position?: number) => await this.read(fd, length, position)
         );
         system["party.openv.filesystem.virtual.onwrite"](TMPFS_NAMESPACE,
             async (fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null) => await this.write(fd, buffer, offset, length, position)
@@ -122,19 +122,19 @@ export class TmpFs {
         if (parentNode === undefined) {
             throw new Error(`ENOENT: no such file or directory, mkdir '${path}'`);
         }
-        
+
         const parentStats = this.#stats.get(parentNode)!;
         if (parentStats.type !== "DIRECTORY") {
             throw new Error(`parent path '${parentPath}' is not a directory.`);
         }
 
         parentStats.mtime = Date.now();
-        
+
         const parentData = this.#data.get(parentNode);
         if (Array.isArray(parentData)) {
             parentData.push(path.split("/").pop()!);
         }
-        
+
 
         const node = this.#nodecounter++;
         this.#paths.set(`${mount}\0${path}`, node);
@@ -299,12 +299,12 @@ export class TmpFs {
         this.#stats.get(file.node)!.atime = Date.now();
     }
 
-    async read(fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number): Promise<number> {
+    async read(fd: number, length: number, position?: number): Promise<Uint8Array> {
         const file = this.#openFiles.get(fd);
         if (!file) {
             throw new Error(`EBADF: bad file descriptor, read '${fd}'`);
         }
-        
+
         if (!file.flags.includes("r") && !file.flags.includes("+")) {
             throw new Error(`EBADF: file not open for reading, read '${fd}'`);
         }
@@ -314,11 +314,16 @@ export class TmpFs {
             throw new Error(`EISDIR: illegal operation on a directory, read '${fd}'`);
         }
 
-        const bytesToRead = Math.min(length ?? data.length, data.length - (position ?? file.position));
-        buffer.set(data.subarray(position ?? file.position, (position ?? file.position) + bytesToRead), offset ?? 0);
-        file.position += bytesToRead;
+        const pos = position ?? file.position;
+        const bytesToRead = Math.min(length, data.length - pos);
+        const result = data.slice(pos, pos + bytesToRead);
+
+        if (position === undefined) {
+            file.position += bytesToRead;
+        }
+
         this.#stats.get(file.node)!.atime = Date.now();
-        return bytesToRead;
+        return result;
     }
 
     async write(fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<number> {
@@ -329,7 +334,7 @@ export class TmpFs {
         if (!file.flags.includes("w") && !file.flags.includes("+") && !file.flags.includes("a")) {
             throw new Error(`EBADF: file not open for writing, write '${fd}'`);
         }
-        
+
         let data = this.#data.get(file.node);
         if (!data || Array.isArray(data)) {
             throw new Error(`EISDIR: illegal operation on a directory, write '${fd}'`);
