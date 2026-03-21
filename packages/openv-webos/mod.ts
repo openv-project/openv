@@ -63,8 +63,8 @@ await registerWebExecutor(openv.system, async (ctx) => {
 
 const FILE_PATH = "/test.js";
 const DEFAULT_CONTENT =
-    `import { createOpEnv } from "/@/lib/openv/openv-core/mod.js";
-const openv = await createOpEnv();
+    `import { connect } from "/@/lib/openv/openv-core/mod.js";
+const openv = await connect();
 
 const enc = new TextEncoder();
 const write = (msg) => openv.system["party.openv.filesystem.write.write"](1, enc.encode(msg));

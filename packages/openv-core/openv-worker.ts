@@ -1,6 +1,6 @@
 import { ClientOpEnv, createPostMessageTransport } from "./mod";
 
-export async function createOpEnv() {
+export async function connect() {
     if (typeof self === "undefined" || typeof (self as any).addEventListener === "undefined") {
         throw new Error("not in a worker context");
     }
