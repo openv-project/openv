@@ -737,13 +737,13 @@ export class ProcessScopedFS implements
     #fdCounter = 2;
     #fdToOfd: Map<number, number> = new Map();
 
-    constructor(system: FileSystemCoreComponent &
+    constructor(pid: number, system: FileSystemCoreComponent &
         FileSystemReadOnlyComponent &
         FileSystemReadWriteComponent &
         FileSystemPipeComponent &
         CoreFSExt &
         ProcessComponent &
-        CoreProcessExt, pid: number, umask = 0o022) {
+        CoreProcessExt, umask = 0o022) {
         this.#system = system;
         this.#pid = pid;
         this.#umask = umask;

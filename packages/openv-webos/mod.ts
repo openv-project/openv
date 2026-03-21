@@ -35,7 +35,7 @@ await openv.enumerateRemote();
 globalThis.openv = openv;
 
 await registerWebExecutor(openv.system, async (ctx) => {
-    const scopedFs = new ProcessScopedFS(openv.system as any);
+    const scopedFs = new ProcessScopedFS(ctx.pid, openv.system as any);
     if (ctx.stdioOfds) {
         for (let i = 0; i < ctx.stdioOfds.length; i++) {
             const ofd = ctx.stdioOfds[i];
