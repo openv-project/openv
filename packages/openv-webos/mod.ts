@@ -1,5 +1,5 @@
 import { FileSystemCoreComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, ProcessComponent } from "@openv-project/openv-api";
-import { ClientOpEnv, CoreFSExt, CoreProcessExt, createPostMessageTransport, ProcessScopedFS, ProcessScopedProcess, registerWebExecutor } from "@openv-project/openv-core";
+import { ClientOpEnv, CoreFSExt, CoreProcessExt, createPostMessageTransport, ProcessScopedFS, ProcessScopedProcess, ProcessScopedRegistry, registerWebExecutor } from "@openv-project/openv-core";
 
 const CHANNEL = "openv-sw-channel";
 
@@ -44,10 +44,11 @@ await registerWebExecutor(openv.system, async (ctx) => {
             }
         }
     }
+    const scopedRegistry = new ProcessScopedRegistry(ctx.pid, openv.system as any);
     const scopedProcess = new ProcessScopedProcess(ctx.pid, openv.system as any);
 
     const result: Record<string, Function> = {};
-    for (const scoped of [scopedFs, scopedProcess]) {
+    for (const scoped of [scopedFs, scopedProcess, scopedRegistry]) {
         let obj = Object.getPrototypeOf(scoped);
         while (obj && obj !== Object.prototype) {
             for (const name of Object.getOwnPropertyNames(obj)) {

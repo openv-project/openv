@@ -1,4 +1,5 @@
-import { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemVirtualComponent, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, SystemComponent } from "@openv-project/openv-api"
+import { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemVirtualComponent, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, ProcessComponent, SystemComponent } from "@openv-project/openv-api"
+import { CoreProcessExt } from "./mod";
 
 type vfs = {
     mount: (path: string) => Promise<void>;
@@ -681,35 +682,142 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
 
 }
 
-/**
- * Process-scoped filesystem component. Wraps a CoreFS and maintains a per-process
- * file descriptor table
- */
-export class ProcessScopedFS implements FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemLocalComponent {
-    #fs: FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemReadWriteComponent & CoreFSExt;
+const S_IRUSR = 0o400;
+const S_IWUSR = 0o200;
+const S_IXUSR = 0o100;
+const S_IRGRP = 0o040;
+const S_IWGRP = 0o020;
+const S_IXGRP = 0o010;
+const S_IROTH = 0o004;
+const S_IWOTH = 0o002;
+const S_IXOTH = 0o001;
+const S_ISVTX = 0o1000;
 
-    /**
-     * Next fd to allocate. Starts at 3 to avoid clashing.
-     */
+type AccessMode = "read" | "write" | "execute";
+
+function checkMode(stat: FsStats, uid: number, gid: number, access: AccessMode): boolean {
+    if (uid === 0) {
+        if (access === "execute") return !!(stat.mode & (S_IXUSR | S_IXGRP | S_IXOTH));
+        return true;
+    }
+    const isOwner = stat.uid === uid;
+    const isGroup = stat.gid === gid;
+    let r: number, w: number, x: number;
+    if (isOwner) { r = S_IRUSR; w = S_IWUSR; x = S_IXUSR; }
+    else if (isGroup) { r = S_IRGRP; w = S_IWGRP; x = S_IXGRP; }
+    else { r = S_IROTH; w = S_IWOTH; x = S_IXOTH; }
+    switch (access) {
+        case "read": return !!(stat.mode & r);
+        case "write": return !!(stat.mode & w);
+        case "execute": return !!(stat.mode & x);
+    }
+}
+
+function requireAccess(stat: FsStats, uid: number, gid: number, access: AccessMode, path: string): void {
+    if (!checkMode(stat, uid, gid, access)) {
+        throw new Error(`EACCES: permission denied, ${access} '${path}'`);
+    }
+}
+
+export class ProcessScopedFS implements
+    FileSystemCoreComponent,
+    FileSystemReadOnlyComponent,
+    FileSystemReadWriteComponent,
+    FileSystemLocalComponent {
+    #system: FileSystemCoreComponent &
+        FileSystemReadOnlyComponent &
+        FileSystemReadWriteComponent &
+        FileSystemPipeComponent &
+        CoreFSExt &
+        ProcessComponent &
+        CoreProcessExt;
+    #pid: number;
+    #umask: number;
+
     #fdCounter = 2;
     #fdToOfd: Map<number, number> = new Map();
 
-    constructor(fs: FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemReadWriteComponent & FileSystemPipeComponent & CoreFSExt) {
-        this.#fs = fs;
+    constructor(system: FileSystemCoreComponent &
+        FileSystemReadOnlyComponent &
+        FileSystemReadWriteComponent &
+        FileSystemPipeComponent &
+        CoreFSExt &
+        ProcessComponent &
+        CoreProcessExt, pid: number, umask = 0o022) {
+        this.#system = system;
+        this.#pid = pid;
+        this.#umask = umask;
+    }
+
+    async #getUid(): Promise<number> {
+        return this.#system["party.openv.process.getuid"](this.#pid);
+    }
+
+    async #getGid(): Promise<number> {
+        return this.#system["party.openv.process.getgid"](this.#pid);
+    }
+
+    async #statAndCheck(path: string, access: AccessMode): Promise<FsStats> {
+        const stat = await this.#system["party.openv.filesystem.read.stat"](path);
+        const uid = await this.#getUid();
+        const gid = await this.#getGid();
+        requireAccess(stat, uid, gid, access, path);
+        return stat;
+    }
+
+    #applyUmask(mode: FileMode): FileMode {
+        return mode & ~this.#umask;
+    }
+
+    async #checkPathTraversal(path: string): Promise<void> {
+        const uid = await this.#getUid();
+        if (uid === 0) return;
+        const gid = await this.#getGid();
+        const parts = path.split("/").filter(Boolean);
+        for (let i = 0; i < parts.length - 1; i++) {
+            const dir = "/" + parts.slice(0, i + 1).join("/");
+            try {
+                const stat = await this.#system["party.openv.filesystem.read.stat"](dir);
+                if (stat.type !== "DIRECTORY") continue;
+                requireAccess(stat, uid, gid, "execute", dir);
+            } catch (e) {
+                if (e instanceof Error && e.message.startsWith("EACCES")) throw e;
+            }
+        }
     }
 
     #resolveOfd(fd: number): number {
         const ofd = this.#fdToOfd.get(fd);
-        if (ofd === undefined) {
-            throw new Error(`Invalid file descriptor ${fd}`);
-        }
+        if (ofd === undefined) throw new Error(`Invalid file descriptor ${fd}`);
         return ofd;
     }
 
     async ["party.openv.filesystem.open"](path: string, flags: OpenFlags, mode?: FileMode): Promise<number> {
-        // Open on the core FS to get a global ofd
-        const ofd = await this.#fs["party.openv.filesystem.open"](path, flags, mode);
-        // Allocate a process-local fd
+        await this.#checkPathTraversal(path);
+
+        const isWrite = flags.includes("w") || flags.includes("a") || flags.includes("+");
+        const isRead = flags.includes("r") || flags.includes("+");
+        const uid = await this.#getUid();
+        const gid = await this.#getGid();
+
+        let stat: FsStats | null = null;
+        try { stat = await this.#system["party.openv.filesystem.read.stat"](path); } catch { }
+
+        if (stat) {
+            if (isRead) requireAccess(stat, uid, gid, "read", path);
+            if (isWrite) requireAccess(stat, uid, gid, "write", path);
+        } else if (isWrite) {
+            const parent = path.split("/").slice(0, -1).join("/") || "/";
+            const parentStat = await this.#system["party.openv.filesystem.read.stat"](parent);
+            requireAccess(parentStat, uid, gid, "write", parent);
+            requireAccess(parentStat, uid, gid, "execute", parent);
+        } else {
+            throw new Error(`ENOENT: no such file or directory, open '${path}'`);
+        }
+
+        const ofd = await this.#system["party.openv.filesystem.open"](
+            path, flags, mode !== undefined ? this.#applyUmask(mode) : mode
+        );
         const fd = ++this.#fdCounter;
         this.#fdToOfd.set(fd, ofd);
         return fd;
@@ -718,52 +826,103 @@ export class ProcessScopedFS implements FileSystemCoreComponent, FileSystemReadO
     async ["party.openv.filesystem.close"](fd: number): Promise<void> {
         const ofd = this.#resolveOfd(fd);
         this.#fdToOfd.delete(fd);
-        await this.#fs["party.openv.impl.filesystem.closeByOfd"](ofd);
+        await this.#system["party.openv.impl.filesystem.closeByOfd"](ofd);
     }
 
     async ["party.openv.filesystem.read.stat"](path: string): Promise<FsStats> {
-        return this.#fs["party.openv.filesystem.read.stat"](path);
+        await this.#checkPathTraversal(path);
+        return this.#system["party.openv.filesystem.read.stat"](path);
     }
 
     async ["party.openv.filesystem.read.read"](fd: number, length: number, position?: number): Promise<Uint8Array> {
         const ofd = this.#resolveOfd(fd);
-        return this.#fs["party.openv.impl.filesystem.readByOfd"](ofd, length, position);
+        return this.#system["party.openv.impl.filesystem.readByOfd"](ofd, length, position);
     }
 
     async ["party.openv.filesystem.read.readdir"](path: string): Promise<string[]> {
-        return this.#fs["party.openv.filesystem.read.readdir"](path);
+        await this.#checkPathTraversal(path);
+        await this.#statAndCheck(path, "read");
+        return this.#system["party.openv.filesystem.read.readdir"](path);
     }
 
     async ["party.openv.filesystem.read.watch"](path: string, options?: { recursive?: boolean }): Promise<{
         events: AsyncIterable<FileSystemEvent>;
         abort: () => Promise<void>;
     }> {
-        return this.#fs["party.openv.filesystem.read.watch"](path, options);
+        await this.#checkPathTraversal(path);
+        await this.#statAndCheck(path, "read");
+        return this.#system["party.openv.filesystem.read.watch"](path, options);
     }
 
     async ["party.openv.filesystem.write.write"](fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<number> {
         const ofd = this.#resolveOfd(fd);
-        return this.#fs["party.openv.impl.filesystem.writeByOfd"](ofd, buffer, offset, length, position);
+        return this.#system["party.openv.impl.filesystem.writeByOfd"](ofd, buffer, offset, length, position);
     }
 
-    async ["party.openv.filesystem.write.create"](path: string, mode?: FileMode): Promise<void> {
-        return this.#fs["party.openv.filesystem.write.create"](path, mode);
+    async ["party.openv.filesystem.write.create"](path: string, mode: FileMode = 0o666): Promise<void> {
+        await this.#checkPathTraversal(path);
+        const parent = path.split("/").slice(0, -1).join("/") || "/";
+        const parentStat = await this.#system["party.openv.filesystem.read.stat"](parent);
+        const uid = await this.#getUid();
+        const gid = await this.#getGid();
+        requireAccess(parentStat, uid, gid, "write", parent);
+        requireAccess(parentStat, uid, gid, "execute", parent);
+        return this.#system["party.openv.filesystem.write.create"](path, this.#applyUmask(mode));
     }
 
-    async ["party.openv.filesystem.write.mkdir"](path: string, mode?: FileMode): Promise<void> {
-        return this.#fs["party.openv.filesystem.write.mkdir"](path, mode);
+    async ["party.openv.filesystem.write.mkdir"](path: string, mode: FileMode = 0o777): Promise<void> {
+        await this.#checkPathTraversal(path);
+        const parent = path.split("/").slice(0, -1).join("/") || "/";
+        const parentStat = await this.#system["party.openv.filesystem.read.stat"](parent);
+        const uid = await this.#getUid();
+        const gid = await this.#getGid();
+        requireAccess(parentStat, uid, gid, "write", parent);
+        requireAccess(parentStat, uid, gid, "execute", parent);
+        return this.#system["party.openv.filesystem.write.mkdir"](path, this.#applyUmask(mode));
     }
 
     async ["party.openv.filesystem.write.rmdir"](path: string): Promise<void> {
-        return this.#fs["party.openv.filesystem.write.rmdir"](path);
-    }
-
-    async ["party.openv.filesystem.write.rename"](oldPath: string, newPath: string): Promise<void> {
-        return this.#fs["party.openv.filesystem.write.rename"](oldPath, newPath);
+        await this.#checkPathTraversal(path);
+        const parent = path.split("/").slice(0, -1).join("/") || "/";
+        const parentStat = await this.#system["party.openv.filesystem.read.stat"](parent);
+        const uid = await this.#getUid();
+        const gid = await this.#getGid();
+        requireAccess(parentStat, uid, gid, "write", parent);
+        requireAccess(parentStat, uid, gid, "execute", parent);
+        return this.#system["party.openv.filesystem.write.rmdir"](path);
     }
 
     async ["party.openv.filesystem.write.unlink"](path: string): Promise<void> {
-        return this.#fs["party.openv.filesystem.write.unlink"](path);
+        await this.#checkPathTraversal(path);
+        const parent = path.split("/").slice(0, -1).join("/") || "/";
+        const parentStat = await this.#system["party.openv.filesystem.read.stat"](parent);
+        const uid = await this.#getUid();
+        const gid = await this.#getGid();
+        requireAccess(parentStat, uid, gid, "write", parent);
+        requireAccess(parentStat, uid, gid, "execute", parent);
+        if (parentStat.mode & S_ISVTX) {
+            const fileStat = await this.#system["party.openv.filesystem.read.stat"](path);
+            if (uid !== 0 && fileStat.uid !== uid) {
+                throw new Error(`EACCES: permission denied (sticky bit), unlink '${path}'`);
+            }
+        }
+        return this.#system["party.openv.filesystem.write.unlink"](path);
+    }
+
+    async ["party.openv.filesystem.write.rename"](oldPath: string, newPath: string): Promise<void> {
+        await this.#checkPathTraversal(oldPath);
+        await this.#checkPathTraversal(newPath);
+        const uid = await this.#getUid();
+        const gid = await this.#getGid();
+        const oldParent = oldPath.split("/").slice(0, -1).join("/") || "/";
+        const newParent = newPath.split("/").slice(0, -1).join("/") || "/";
+        const oldParentStat = await this.#system["party.openv.filesystem.read.stat"](oldParent);
+        const newParentStat = await this.#system["party.openv.filesystem.read.stat"](newParent);
+        requireAccess(oldParentStat, uid, gid, "write", oldParent);
+        requireAccess(oldParentStat, uid, gid, "execute", oldParent);
+        requireAccess(newParentStat, uid, gid, "write", newParent);
+        requireAccess(newParentStat, uid, gid, "execute", newParent);
+        return this.#system["party.openv.filesystem.write.rename"](oldPath, newPath);
     }
 
     async ["party.openv.filesystem.local.listfds"](): Promise<number[]> {
@@ -782,33 +941,28 @@ export class ProcessScopedFS implements FileSystemCoreComponent, FileSystemReadO
         if (this.#fdToOfd.has(targetFd) && targetFd !== fd) {
             const existingOfd = this.#fdToOfd.get(targetFd)!;
             this.#fdToOfd.delete(targetFd);
-            await this.#fs["party.openv.impl.filesystem.closeByOfd"](existingOfd);
+            await this.#system["party.openv.impl.filesystem.closeByOfd"](existingOfd);
         }
         this.#fdToOfd.set(targetFd, ofd);
-        if (targetFd > this.#fdCounter) {
-            this.#fdCounter = targetFd;
-        }
+        if (targetFd > this.#fdCounter) this.#fdCounter = targetFd;
         return targetFd;
     }
 
     async ["party.openv.filesystem.local.setfd"](targetFd: number, ofd: number): Promise<void> {
-        if (!await this.#fs["party.openv.impl.filesystem.hasOfd"](ofd)) {
+        if (!await this.#system["party.openv.impl.filesystem.hasOfd"](ofd)) {
             throw new Error(`Global open file number ${ofd} does not exist.`);
         }
         if (this.#fdToOfd.has(targetFd)) {
             const existingOfd = this.#fdToOfd.get(targetFd)!;
             this.#fdToOfd.delete(targetFd);
-            await this.#fs["party.openv.impl.filesystem.closeByOfd"](existingOfd);
+            await this.#system["party.openv.impl.filesystem.closeByOfd"](existingOfd);
         }
         this.#fdToOfd.set(targetFd, ofd);
-        if (targetFd > this.#fdCounter) {
-            this.#fdCounter = targetFd;
-        }
+        if (targetFd > this.#fdCounter) this.#fdCounter = targetFd;
     }
 
     async ["party.openv.filesystem.pipe.create"](bufferSize?: number): Promise<[readEnd: number, writeEnd: number]> {
-        const [readOfd, writeOfd] = await this.#fs["party.openv.impl.filesystem.createPipeOfd"](bufferSize);
-        // Allocate process-local fds
+        const [readOfd, writeOfd] = await this.#system["party.openv.impl.filesystem.createPipeOfd"](bufferSize);
         const readFd = ++this.#fdCounter;
         const writeFd = ++this.#fdCounter;
         this.#fdToOfd.set(readFd, readOfd);
@@ -824,20 +978,15 @@ export class ProcessScopedFS implements FileSystemCoreComponent, FileSystemReadO
     async supports(ns: string): Promise<string | null> {
         switch (ns) {
             case FS_NAMESPACE:
-            case FS_NAMESPACE_VERSIONED:
-                return FS_NAMESPACE_VERSIONED;
+            case FS_NAMESPACE_VERSIONED: return FS_NAMESPACE_VERSIONED;
             case FS_READ_NAMESPACE:
-            case FS_READ_NAMESPACE_VERSIONED:
-                return FS_READ_NAMESPACE_VERSIONED;
+            case FS_READ_NAMESPACE_VERSIONED: return FS_READ_NAMESPACE_VERSIONED;
             case FS_WRITE_NAMESPACE:
-            case FS_WRITE_NAMESPACE_VERSIONED:
-                return FS_WRITE_NAMESPACE_VERSIONED;
+            case FS_WRITE_NAMESPACE_VERSIONED: return FS_WRITE_NAMESPACE_VERSIONED;
             case FS_LOCAL_NAMESPACE:
-            case FS_LOCAL_NAMESPACE_VERSIONED:
-                return FS_LOCAL_NAMESPACE_VERSIONED;
+            case FS_LOCAL_NAMESPACE_VERSIONED: return FS_LOCAL_NAMESPACE_VERSIONED;
             case FS_PIPE_NAMESPACE:
-            case FS_PIPE_NAMESPACE_VERSIONED:
-                return FS_PIPE_NAMESPACE_VERSIONED;
+            case FS_PIPE_NAMESPACE_VERSIONED: return FS_PIPE_NAMESPACE_VERSIONED;
         }
         return null;
     }

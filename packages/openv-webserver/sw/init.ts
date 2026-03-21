@@ -32,7 +32,7 @@ export async function ensureInitialized(): Promise<void> {
         await new TmpFs().register(coreFs);
         await coreFs["party.openv.filesystem.virtual.mount"]("party.openv.impl.tmpfs", "/");
 
-        await applyRegistryDefaults();
+        await scaffoldRegistry();
         await applyBridgeConfig();
         await runUpdater();
 
@@ -51,7 +51,66 @@ export async function ensureDefault(key: string, entry: string, value: RegistryV
     }
 }
 
-async function applyRegistryDefaults(): Promise<void> {
+const ACL_KEY = "/system/party/openv/registry/acl" as const;
+
+type ACLEntry = {
+    read: "any" | "owner" | number | number[];
+    write: "any" | "owner" | number | number[];
+    readGroups?: number[];
+    writeGroups?: number[];
+};
+
+function acl(entry: ACLEntry): string {
+    return JSON.stringify(entry);
+}
+
+async function ensureKey(key: string): Promise<void> {
+    await coreRegistry["party.openv.registry.write.createKey"](key).catch(() => { });
+}
+
+async function scaffoldRegistry(): Promise<void> {
+    await ensureKey("/system");
+    await ensureKey("/api");
+    await ensureKey("/users");
+    await ensureKey("/groups");
+
+    await ensureKey("/system/party");
+    await ensureKey("/system/party/openv");
+    await ensureKey("/system/party/openv/registry");
+    await ensureKey("/system/party/openv/registry/acl");
+    await ensureKey("/system/party/openv/serviceWorker");
+    await ensureKey("/system/party/openv/serviceWorker/bridge");
+    await ensureKey("/system/party/openv/serviceWorker/updater");
+    await ensureKey("/system/party/openv/serviceWorker/updater/stage0");
+
+    await ensureKey("/api/party");
+    await ensureKey("/api/party/openv");
+
+    await ensureDefault(ACL_KEY, "/system/party/openv/registry/acl/**", acl({
+        read: "any",
+        write: 0,
+    }));
+
+    await ensureDefault(ACL_KEY, "/system/**", acl({
+        read: "any",
+        write: 0,
+    }));
+
+    await ensureDefault(ACL_KEY, "/users/*/**", acl({
+        read: "any",
+        write: "owner",
+    }));
+
+    await ensureDefault(ACL_KEY, "/users/*", acl({
+        read: "any",
+        write: "owner",
+    }));
+
+    await ensureDefault(ACL_KEY, "/groups/**", acl({
+        read: "any",
+        write: 0,
+    }));
+
     for (const [key, entry, value] of [...BRIDGE_DEFAULTS, ...UPDATER_DEFAULTS]) {
         await ensureDefault(key, entry, value);
     }

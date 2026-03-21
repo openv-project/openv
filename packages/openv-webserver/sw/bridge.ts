@@ -1,6 +1,8 @@
 /// <reference lib="webworker" />
 import { coreFs, coreRegistry, ensureInitialized } from "./init.ts";
 
+export const BRIDGE_KEY = "/system/party/openv/serviceWorker/bridge" as const;
+
 export let bridgeEnabled = true;
 export let bridgePaths: [string, string][] = [
     ["/@/", "/"],
@@ -8,19 +10,15 @@ export let bridgePaths: [string, string][] = [
 ];
 
 export const BRIDGE_DEFAULTS: [string, string, string | boolean][] = [
-    ["/ServiceWorker/Bridge", "Enabled", true],
-    ["/ServiceWorker/Bridge", "Paths", JSON.stringify(bridgePaths)],
+    [BRIDGE_KEY, "enabled", true],
+    [BRIDGE_KEY, "paths", JSON.stringify(bridgePaths)],
 ];
 
 export async function applyBridgeConfig(): Promise<void> {
-    const enabledVal = await coreRegistry["party.openv.registry.read.readEntry"](
-        "/ServiceWorker/Bridge", "Enabled"
-    );
+    const enabledVal = await coreRegistry["party.openv.registry.read.readEntry"](BRIDGE_KEY, "enabled");
     bridgeEnabled = enabledVal !== false;
 
-    const pathsRaw = await coreRegistry["party.openv.registry.read.readEntry"](
-        "/ServiceWorker/Bridge", "Paths"
-    );
+    const pathsRaw = await coreRegistry["party.openv.registry.read.readEntry"](BRIDGE_KEY, "paths");
     try {
         if (pathsRaw) bridgePaths = JSON.parse(pathsRaw as string);
     } catch { }

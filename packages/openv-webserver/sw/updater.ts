@@ -2,28 +2,28 @@
 import { parseTar } from "nanotar";
 import { coreFs, coreRegistry } from "./init.ts";
 
+export const UPDATER_KEY = "/system/party/openv/serviceWorker/updater/stage0" as const;
+
 export const UPDATER_BEHAVIOR_DISABLED = 0;
 export const UPDATER_BEHAVIOR_IF_MISSING = 1;
 export const UPDATER_BEHAVIOR_OVERWRITE = 2;
 
 export const UPDATER_DEFAULTS: [string, string, string | number][] = [
-    ["/Updater/Stage0", "Behavior", UPDATER_BEHAVIOR_OVERWRITE],
-    ["/Updater/Stage0", "Src", "/stage0.tar"],
-    ["/Updater/Stage0", "Dest", "/"],
+    [UPDATER_KEY, "behavior", UPDATER_BEHAVIOR_OVERWRITE],
+    [UPDATER_KEY, "src", "/stage0.tar"],
+    [UPDATER_KEY, "dest", "/"],
 ];
 
 export async function runUpdater(): Promise<void> {
-    const behavior = await coreRegistry["party.openv.registry.read.readEntry"](
-        "/Updater/Stage0", "Behavior"
-    ) as number;
+    const behavior = await coreRegistry["party.openv.registry.read.readEntry"](UPDATER_KEY, "behavior") as number;
 
     if (behavior === UPDATER_BEHAVIOR_DISABLED) {
         console.log("[updater] stage0 disabled, skipping");
         return;
     }
 
-    const src = await coreRegistry["party.openv.registry.read.readEntry"]("/Updater/Stage0", "Src") as string;
-    const dest = await coreRegistry["party.openv.registry.read.readEntry"]("/Updater/Stage0", "Dest") as string;
+    const src = await coreRegistry["party.openv.registry.read.readEntry"](UPDATER_KEY, "src") as string;
+    const dest = await coreRegistry["party.openv.registry.read.readEntry"](UPDATER_KEY, "dest") as string;
 
     console.log(`[updater] stage0 behavior=${behavior} src=${src} dest=${dest}`);
 
