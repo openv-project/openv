@@ -2,7 +2,7 @@
 declare const self: ServiceWorkerGlobalScope;
 
 import { ensureInitialized } from "./sw/init.ts";
-import { handleFetch, bridgeEnabled } from "./sw/bridge.ts";
+import { handleFetch } from "./sw/bridge.ts";
 import { handleMessage, createPeerForClient, pruneDeadClients } from "./sw/peer.ts";
 
 self.addEventListener("install", () => {
@@ -17,7 +17,6 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event: FetchEvent) => {
-    if (!bridgeEnabled) return;
     event.waitUntil(ensureInitialized());
     handleFetch(event);
 });

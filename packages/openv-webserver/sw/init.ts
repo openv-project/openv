@@ -3,7 +3,7 @@ import {
     CoreFS, CoreOpEnv, CoreProcess, CoreRegistry, OPFS, TmpFs,
 } from "@openv-project/openv-core";
 import type { RegistryValue } from "@openv-project/openv-api";
-import { runUpdater } from "./updater.ts";
+import { DEFAULT_PATCH_KEY, UPDATER_KEY, runUpdater } from "./updater.ts";
 import { BRIDGE_DEFAULTS, applyBridgeConfig } from "./bridge.ts";
 import { UPDATER_DEFAULTS } from "./updater.ts";
 
@@ -34,8 +34,8 @@ export async function ensureInitialized(): Promise<void> {
         await coreFs["party.openv.filesystem.virtual.mount"]("party.openv.impl.opfs", "/");
 
         await scaffoldRegistry();
-        await applyBridgeConfig();
         await runUpdater();
+        await applyBridgeConfig();
 
         initialized = true;
         initPromise = null;
@@ -81,8 +81,8 @@ async function scaffoldRegistry(): Promise<void> {
     await ensureKey("/system/party/openv/registry/acl");
     await ensureKey("/system/party/openv/serviceWorker");
     await ensureKey("/system/party/openv/serviceWorker/bridge");
-    await ensureKey("/system/party/openv/serviceWorker/updater");
-    await ensureKey("/system/party/openv/serviceWorker/updater/stage0");
+    await ensureKey(UPDATER_KEY);
+    await ensureKey(DEFAULT_PATCH_KEY);
 
     await ensureKey("/api/party");
     await ensureKey("/api/party/openv");
