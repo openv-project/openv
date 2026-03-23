@@ -70,9 +70,57 @@ const openv = await connect();
 const enc = new TextEncoder();
 const write = (msg) => openv.system["party.openv.filesystem.write.write"](1, enc.encode(msg));
 
+const now = new Date().toISOString();
 const pid = await openv.system["party.openv.process.local.getpid"]();
-await write("hello from process pid=" + pid + "\\n");
-await write("cwd: " + await openv.system["party.openv.process.local.getcwd"]() + "\\n");
+const cwd = await openv.system["party.openv.process.local.getcwd"]();
+await write("file write demo pid=" + pid + "\\n");
+await write("cwd: " + cwd + "\\n");
+await write("timestamp: " + now + "\\n");
+
+async function ensureDir(path) {
+    try {
+        await openv.system["party.openv.filesystem.read.stat"](path);
+        return;
+    } catch {}
+    await openv.system["party.openv.filesystem.write.mkdir"](path, 0o755);
+}
+
+const rootDir = "/demo-dates";
+await ensureDir(rootDir);
+await ensureDir(rootDir + "/nested");
+await ensureDir(rootDir + "/nested/a");
+await ensureDir(rootDir + "/nested/b");
+
+const files = [
+    rootDir + "/date.txt",
+    rootDir + "/nested/a/date-a.txt",
+    rootDir + "/nested/b/date-b.txt",
+    rootDir + "/nested/b/date-c.txt",
+];
+
+for (const path of files) {
+    const fd = await openv.system["party.openv.filesystem.open"](path, "w", 0o644);
+    try {
+        const content = "date=" + now + "\\npath=" + path + "\\npid=" + pid + "\\n";
+        await openv.system["party.openv.filesystem.write.write"](fd, enc.encode(content));
+        await openv.system["party.openv.filesystem.sync.sync"](fd);
+    } finally {
+        await openv.system["party.openv.filesystem.close"](fd);
+    }
+    await write("wrote " + path + "\\n");
+
+    const st = await openv.system["party.openv.filesystem.read.stat"](path);
+    const rfd = await openv.system["party.openv.filesystem.open"](path, "r", 0o444);
+    try {
+        const data = await openv.system["party.openv.filesystem.read.read"](rfd, st.size);
+        const text = new TextDecoder().decode(data);
+        await write("verified " + path + " bytes=" + st.size + " firstLine=" + text.split("\\n")[0] + "\\n");
+    } finally {
+        await openv.system["party.openv.filesystem.close"](rfd);
+    }
+}
+
+await write("completed: " + files.length + " files\\n");
 await openv.system["party.openv.process.local.exit"](0);
 `;
 

@@ -773,7 +773,7 @@ export class ProcessScopedFS implements
         if (ofdGlobal === undefined) {
             throw new Error(`Invalid file descriptor ${ofd}`);
         }
-        await this.#system["party.openv.impl.filesystem.sync.sync"](ofdGlobal);
+        await this.#system["party.openv.filesystem.sync.sync"](ofdGlobal);
     }
 
     async #getUid(): Promise<number> {

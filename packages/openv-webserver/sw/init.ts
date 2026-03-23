@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 import {
-    CoreFS, CoreOpEnv, CoreProcess, CoreRegistry, TmpFs,
+    CoreFS, CoreOpEnv, CoreProcess, CoreRegistry, OPFS, TmpFs,
 } from "@openv-project/openv-core";
 import type { RegistryValue } from "@openv-project/openv-api";
 import { runUpdater } from "./updater.ts";
@@ -17,9 +17,8 @@ openv.installSystemComponent(coreFs);
 openv.installSystemComponent(coreProcess);
 coreProcess.setFsExt(coreFs);
 
+// expose openv global for debug
 (globalThis as any).openv = openv;
-
-// ─── Lazy init ────────────────────────────────────────────────────────────────
 
 let initialized = false;
 let initPromise: Promise<void> | null = null;
@@ -30,7 +29,9 @@ export async function ensureInitialized(): Promise<void> {
 
     initPromise = (async () => {
         await new TmpFs().register(coreFs);
-        await coreFs["party.openv.filesystem.virtual.mount"]("party.openv.impl.tmpfs", "/");
+        const opfs = new OPFS();
+        await opfs.register(coreFs);
+        await coreFs["party.openv.filesystem.virtual.mount"]("party.openv.impl.opfs", "/");
 
         await scaffoldRegistry();
         await applyBridgeConfig();

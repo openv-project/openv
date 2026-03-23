@@ -8,6 +8,36 @@ export type StreamSink = {
     error: (err: string) => void;
 };
 
+function maybeTypedArrayLikeObject(value: unknown): Uint8Array | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const obj = value as Record<string, unknown>;
+    const length = obj.length;
+    if (typeof length !== "number" || !Number.isInteger(length) || length < 0 || length > 50_000_000) {
+        return null;
+    }
+    const out = new Uint8Array(length);
+    for (let i = 0; i < length; i++) {
+        const n = obj[String(i)];
+        if (typeof n !== "number" || !Number.isFinite(n) || n < 0 || n > 255) {
+            return null;
+        }
+        out[i] = n;
+    }
+    return out;
+}
+
+function isArrayBufferLike(value: unknown): value is ArrayBuffer {
+    return Object.prototype.toString.call(value) === "[object ArrayBuffer]";
+}
+
+function isBlobLike(value: unknown): value is Blob {
+    return typeof Blob !== "undefined" && value instanceof Blob;
+}
+
+function isBinaryLike(value: unknown): boolean {
+    return isArrayBufferLike(value) || ArrayBuffer.isView(value as any) || isBlobLike(value);
+}
+
 export class CoreSystemLinkPeer implements SystemLinkPeer {
     #functions: Record<string, (...args: PlainParameter[]) => Promise<PlainParameter | void>> = {};
     #transport: SystemLinkTransport | null = null;
@@ -31,23 +61,8 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
         if (typeof arg === "string" || typeof arg === "number" || typeof arg === "boolean" || arg === null) {
             return { literal: arg };
         }
-        if (
-            arg instanceof Uint8Array ||
-            arg instanceof Uint8ClampedArray ||
-            arg instanceof Uint16Array ||
-            arg instanceof Uint32Array ||
-            arg instanceof Int8Array ||
-            arg instanceof Int16Array ||
-            arg instanceof Int32Array ||
-            arg instanceof Float32Array ||
-            arg instanceof Float64Array ||
-            arg instanceof BigInt64Array ||
-            arg instanceof BigUint64Array ||
-            arg instanceof ArrayBuffer ||
-            arg instanceof DataView ||
-            arg instanceof Blob
-        ) {
-            return { literal: arg };
+        if (isBinaryLike(arg)) {
+            return { literal: arg as any };
         }
         if (Array.isArray(arg)) {
             return { literal: arg.map(item => this.#handleOutgoingArg(item)) };
@@ -184,23 +199,12 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
             if (typeof lit === "string" || typeof lit === "number" || typeof lit === "boolean" || lit === null) {
                 return lit;
             }
-            if (
-                lit instanceof Uint8Array ||
-                lit instanceof Uint8ClampedArray ||
-                lit instanceof Uint16Array ||
-                lit instanceof Uint32Array ||
-                lit instanceof Int8Array ||
-                lit instanceof Int16Array ||
-                lit instanceof Int32Array ||
-                lit instanceof Float32Array ||
-                lit instanceof Float64Array ||
-                lit instanceof BigInt64Array ||
-                lit instanceof BigUint64Array ||
-                lit instanceof ArrayBuffer ||
-                lit instanceof DataView ||
-                lit instanceof Blob
-            ) {
+            if (isBinaryLike(lit)) {
                 return lit;
+            }
+            const recoveredBytes = maybeTypedArrayLikeObject(lit);
+            if (recoveredBytes) {
+                return recoveredBytes;
             }
             if (Array.isArray(lit)) {
                 return lit.map(item => this.#systemLinkToPlain(item));
@@ -297,8 +301,12 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
                 this.#transport?.send(response);
             }
         } else if (message.type === "response") {
-            const value = message.success ? (message.ok as SystemLinkParameter) : { literal: message.err };
-            this.#resolvePromise(message.id, value);
+            if (message.success) {
+                const value = message.ok as SystemLinkParameter;
+                this.#resolvePromise(message.id, value);
+            } else {
+                this.#rejectPromise(message.id, new Error(message.err));
+            }
         }
     }
 
@@ -316,6 +324,12 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
         if (!this.#promises[id]) this.#createPromise(id);
         const promise = this.#promises[id];
         promise[1](value);
+    }
+
+    #rejectPromise(id: number, reason: unknown): void {
+        if (!this.#promises[id]) this.#createPromise(id);
+        const promise = this.#promises[id];
+        promise[2](reason);
     }
 
     #deletePromise(id: number): void {

@@ -53,9 +53,10 @@ export function createPostMessageTransport(
     const listener = async (ev: MessageEvent) => {
         const data = ev.data;
         if (!data || typeof data !== "object") return;
-        if (data[NAMESPACE].channel !== channel) return;
+        const meta = (data as any)[NAMESPACE] as { channel?: string; control?: boolean } | undefined;
+        if (!meta || meta.channel !== channel) return;
 
-        const control = data[NAMESPACE].control;
+        const control = meta.control;
         if (control === true) {
             const action: "open" | "close" = data.action;
             if (action === "open") {
