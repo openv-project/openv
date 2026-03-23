@@ -2,8 +2,9 @@ import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { readFile, stat, watch } from "node:fs/promises";
 import { join, extname } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-const ROOT = new URL("../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const DIST = join(ROOT, "dist");
 const PORT = 3300;
 

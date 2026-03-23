@@ -1,12 +1,13 @@
 import * as esbuild from "esbuild";
 import { readdir, readFile, writeFile, mkdir, cp } from "node:fs/promises";
-import { join, relative, dirname, extname } from "node:path";
+import { join, relative, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { createTar } from "nanotar";
 import { importRewriter } from "./import-rewriter.ts";
 
-const ROOT = new URL("../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const DIST = join(ROOT, "dist");
 const STAGE0_STAGING = join(ROOT, ".stage0-staging");
 
@@ -47,7 +48,7 @@ for (const pkg of STAGE0_PACKAGES) {
     const tsconfig = join(ROOT, pkg.src, "tsconfig.json");
     if (!existsSync(tsconfig)) continue;
     try {
-        execSync(`tsc -p ${tsconfig}`, { cwd: ROOT, stdio: "inherit" });
+        execSync(`tsc -p .`, { cwd: join(ROOT, pkg.src), stdio: "inherit" });
         console.log(`  types completed for ${pkg.src}`);
     } catch {
         console.warn(`  types for ${pkg.src} errored`);
