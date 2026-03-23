@@ -202,4 +202,21 @@ export interface FileSystemVirtualComponent extends SystemComponent<typeof FS_VI
         events: AsyncIterable<FileSystemEvent>;
         abort: () => Promise<void>;
     }>): Promise<void>;
+    ["party.openv.filesystem.virtual.onsync"](id: string, handler: (ofd: number) => Promise<void>): Promise<void>;
+}
+
+export const FS_SYNC_NAMESPACE = `${FS_NAMESPACE}.sync` as const;
+export const FS_SYNC_NAMESPACE_VERSIONED = `${FS_SYNC_NAMESPACE}/0.1.0` as const;
+
+/**
+ * This component is implemented on filesystems that support explicit sync, where data may stay buffered
+ * until an explicit flush operation is performed. The sync method accepts an open file number/fd and flushes
+ * any buffered data for that file to the underlying storage medium. This is a no-op on filesystems that do not
+ * support buffering.
+ * 
+ * For VFS: If your VFS does not support buffering, do not call `party.openv.filesystem.virtual.onsync` at all. 
+ * The VFS layer should guard against missing sync support by acting like a no-op if the sync method is not implemented.
+ */
+export interface FileSystemSyncComponent extends SystemComponent<typeof FS_SYNC_NAMESPACE_VERSIONED, typeof FS_SYNC_NAMESPACE> {
+    ["party.openv.filesystem.sync.sync"](ofd: number): Promise<void>;
 }

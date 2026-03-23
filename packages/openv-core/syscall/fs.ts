@@ -1,7 +1,7 @@
-import { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemVirtualComponent, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, ProcessComponent, SystemComponent } from "@openv-project/openv-api"
+import { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemSyncComponent, FileSystemVirtualComponent, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_SYNC_NAMESPACE, FS_SYNC_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, ProcessComponent, SystemComponent } from "@openv-project/openv-api"
 import { CoreProcessExt } from "./mod";
 
-type vfs = {
+type VFS = {
     mount: (path: string) => Promise<void>;
     unmount: (path: string) => Promise<void>;
     open: (path: string, ofd: number, flags: OpenFlags, mode: FileMode) => Promise<void>;
@@ -19,6 +19,7 @@ type vfs = {
         events: AsyncIterable<FileSystemEvent>;
         abort: () => Promise<void>;
     }>;
+    sync: (ofd: number) => Promise<void>;
 };
 
 const CORE_FS_EXT_NAMESPACE = "party.openv.impl.filesystem" as const;
@@ -56,7 +57,21 @@ export interface CoreFSExt extends SystemComponent<typeof CORE_FS_EXT_NAMESPACE_
     ["party.openv.impl.filesystem.createPipeOfd"](bufferSize?: number): Promise<[readOfd: number, writeOfd: number]>;
 }
 
-export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemPipeComponent, CoreFSExt {
+export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemPipeComponent, FileSystemSyncComponent, CoreFSExt {
+    async ["party.openv.filesystem.sync.sync"](ofd: number): Promise<void> {
+        const entry = this.#ofdTable.get(ofd);
+        if (!entry) {
+            throw new Error(`Invalid open file number ${ofd}`);
+        }
+        if (entry.provider && typeof entry.provider.sync === "function") {
+            await entry.provider.sync(ofd);
+        }
+    }
+    async ["party.openv.filesystem.virtual.onsync"](id: string, handler: (ofd: number) => Promise<void>): Promise<void> {
+        const vfs = this.#getVfs(id);
+        vfs.sync = handler;
+    }
+
     async ["party.openv.filesystem.write.create"](path: string, mode?: FileMode): Promise<void> {
         const resolved = this.#resolveMountPath(path);
         if (!resolved) {
@@ -263,7 +278,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     #ofdTable: Map<number, {
         path: string;
         providerId?: string;
-        provider?: Partial<vfs>;
+        provider?: Partial<VFS>;
         flags: OpenFlags;
         mode: FileMode;
     }> = new Map();
@@ -337,7 +352,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
      * but named partial vfs object is created. The `party.openv.filesystem.virtual.on*` functions register the
      * corresponding function on the vfs object.
      */
-    #vfsTable: Map<string, Partial<vfs>> = new Map();
+    #vfsTable: Map<string, Partial<VFS>> = new Map();
 
     async ["party.openv.filesystem.virtual.create"](id: string): Promise<void> {
         if (this.#vfsTable.has(id)) {
@@ -592,6 +607,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     supports(ns: typeof FS_VIRTUAL_NAMESPACE | typeof FS_VIRTUAL_NAMESPACE_VERSIONED): Promise<typeof FS_VIRTUAL_NAMESPACE_VERSIONED>;
     supports(ns: typeof FS_READ_NAMESPACE | typeof FS_READ_NAMESPACE_VERSIONED): Promise<typeof FS_READ_NAMESPACE_VERSIONED>;
     supports(ns: typeof FS_WRITE_NAMESPACE | typeof FS_WRITE_NAMESPACE_VERSIONED): Promise<typeof FS_WRITE_NAMESPACE_VERSIONED>;
+    supports(ns: typeof FS_SYNC_NAMESPACE | typeof FS_SYNC_NAMESPACE_VERSIONED): Promise<typeof FS_SYNC_NAMESPACE_VERSIONED>;
     supports(ns: typeof FS_NAMESPACE | typeof FS_NAMESPACE_VERSIONED): Promise<typeof FS_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
         if (
@@ -636,7 +652,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     /**
      * Retrieves the vfs entry for the given id, throwing if it doesn't exist.
      */
-    #getVfs(id: string): Partial<vfs> {
+    #getVfs(id: string): Partial<VFS> {
         const vfs = this.#vfsTable.get(id);
         if (!vfs) {
             throw new Error(`Virtual filesystem "${id}" does not exist.`);
@@ -723,11 +739,14 @@ export class ProcessScopedFS implements
     FileSystemCoreComponent,
     FileSystemReadOnlyComponent,
     FileSystemReadWriteComponent,
+    FileSystemPipeComponent,
+    FileSystemSyncComponent,
     FileSystemLocalComponent {
     #system: FileSystemCoreComponent &
         FileSystemReadOnlyComponent &
         FileSystemReadWriteComponent &
         FileSystemPipeComponent &
+        FileSystemSyncComponent &
         CoreFSExt &
         ProcessComponent &
         CoreProcessExt;
@@ -741,12 +760,20 @@ export class ProcessScopedFS implements
         FileSystemReadOnlyComponent &
         FileSystemReadWriteComponent &
         FileSystemPipeComponent &
+        FileSystemSyncComponent &
         CoreFSExt &
         ProcessComponent &
         CoreProcessExt, umask = 0o022) {
         this.#system = system;
         this.#pid = pid;
         this.#umask = umask;
+    }
+    async ["party.openv.filesystem.sync.sync"](ofd: number): Promise<void> {
+        const ofdGlobal = this.#fdToOfd.get(ofd);
+        if (ofdGlobal === undefined) {
+            throw new Error(`Invalid file descriptor ${ofd}`);
+        }
+        await this.#system["party.openv.impl.filesystem.sync.sync"](ofdGlobal);
     }
 
     async #getUid(): Promise<number> {
@@ -974,6 +1001,7 @@ export class ProcessScopedFS implements
     async supports(ns: typeof FS_READ_NAMESPACE | typeof FS_READ_NAMESPACE_VERSIONED): Promise<typeof FS_READ_NAMESPACE_VERSIONED>;
     async supports(ns: typeof FS_WRITE_NAMESPACE | typeof FS_WRITE_NAMESPACE_VERSIONED): Promise<typeof FS_WRITE_NAMESPACE_VERSIONED>;
     async supports(ns: typeof FS_LOCAL_NAMESPACE | typeof FS_LOCAL_NAMESPACE_VERSIONED): Promise<typeof FS_LOCAL_NAMESPACE_VERSIONED>;
+    async supports(ns: typeof FS_SYNC_NAMESPACE | typeof FS_SYNC_NAMESPACE_VERSIONED): Promise<typeof FS_SYNC_NAMESPACE_VERSIONED>;
     async supports(ns: typeof FS_PIPE_NAMESPACE | typeof FS_PIPE_NAMESPACE_VERSIONED): Promise<typeof FS_PIPE_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
         switch (ns) {
