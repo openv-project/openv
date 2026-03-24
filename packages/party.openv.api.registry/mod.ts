@@ -1,4 +1,4 @@
-import { REGISTRY_READ_NAMESPACE, REGISTRY_WRITE_NAMESPACE, type API, type OpEnv, type RegistryReadComponent, type RegistryValue, type RegistryWriteComponent } from "@openv-project/openv-api";
+import { REGISTRY_READ_NAMESPACE, REGISTRY_WRITE_NAMESPACE, type API, type OpEnv, type RegistryEntryWatchEvent, type RegistryKeyWatchEvent, type RegistryReadComponent, type RegistryValue, type RegistryWatchEvent, type RegistryWatchOptions, type RegistryWatcher, type RegistryWriteComponent } from "@openv-project/openv-api";
 
 
 export type RegKey = {
@@ -17,7 +17,7 @@ type UnresolvedRegKey = {
 export type RegistryFile = {
   meta: {
     key: string;
-    format: "party.openv.registryapi.json";
+    format: "party.openv.api.registry.json";
   };
   root: RegKey | null;
 }
@@ -60,20 +60,24 @@ export default class RegistryApi implements API<"party.openv.api.registry"> {
     return await (this.openv.system["party.openv.registry.read.keyExists"] as any)(key);
   }
 
-  async watchEntry(key: string, entry: string): Promise<{
-    changes: AsyncIterable<RegistryValue | null>;
-    abort: () => Promise<void>;
-  }> {
+  async watchEntry(key: string, entry: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryEntryWatchEvent>> {
     if (!await this.openv.system.supports(REGISTRY_READ_NAMESPACE)) throw new Error("Registry is not supported in this environment.");
-    return await (this.openv.system["party.openv.registry.read.watchEntry"] as any)(key, entry);
+    return await (this.openv.system["party.openv.registry.read.watchEntry"] as any)(key, entry, options);
   }
 
-  async watchDefault(key: string): Promise<{
-    changes: AsyncIterable<RegistryValue | null>;
-    abort: () => Promise<void>;
-  }> {
+  async watchDefault(key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryEntryWatchEvent>> {
     if (!await this.openv.system.supports(REGISTRY_READ_NAMESPACE)) throw new Error("Registry is not supported in this environment.");
-    return await (this.openv.system["party.openv.registry.read.watchDefault"] as any)(key);
+    return await (this.openv.system["party.openv.registry.read.watchDefault"] as any)(key, options);
+  }
+
+  async watchKey(key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryKeyWatchEvent>> {
+    if (!await this.openv.system.supports(REGISTRY_READ_NAMESPACE)) throw new Error("Registry is not supported in this environment.");
+    return await (this.openv.system["party.openv.registry.read.watchKey"] as any)(key, options);
+  }
+
+  async watch(key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryWatchEvent>> {
+    if (!await this.openv.system.supports(REGISTRY_READ_NAMESPACE)) throw new Error("Registry is not supported in this environment.");
+    return await (this.openv.system["party.openv.registry.read.watch"] as any)(key, options);
   }
 
   async writeEntry(key: string, entry: string, value: RegistryValue): Promise<void> {
@@ -151,7 +155,7 @@ export default class RegistryApi implements API<"party.openv.api.registry"> {
     const data: RegistryFile = {
       meta: {
         key,
-        format: "party.openv.registryapi.json",
+        format: "party.openv.api.registry.json",
       },
       root: await this.#resolveRegKey(this.#serializeKey(key)),
     };
@@ -162,7 +166,7 @@ export default class RegistryApi implements API<"party.openv.api.registry"> {
   async deserialize(data: string): Promise<void> {
     if (!await this.openv.system.supports(REGISTRY_WRITE_NAMESPACE)) throw new Error("Registry is not supported in this environment.");
     const parsed: RegistryFile = JSON.parse(data);
-    if (parsed.meta.format !== "party.openv.registryapi.json") {
+    if (parsed.meta.format !== "party.openv.api.registry.json") {
       throw new Error("Invalid registry file format.");
     }
 

@@ -6,6 +6,7 @@ import type { RegistryValue } from "@openv-project/openv-api";
 import { DEFAULT_PATCH_KEY, UPDATER_KEY, runUpdater } from "./updater.ts";
 import { BRIDGE_DEFAULTS, applyBridgeConfig } from "./bridge.ts";
 import { UPDATER_DEFAULTS } from "./updater.ts";
+import { hydrateSystemRegistryFromIdb, startSystemRegistryPersistence, syncSystemRegistryToIdb } from "./system-registry-idb.ts";
 
 export const openv = new CoreOpEnv();
 export const coreRegistry = new CoreRegistry();
@@ -33,7 +34,10 @@ export async function ensureInitialized(): Promise<void> {
         await opfs.register(coreFs);
         await coreFs["party.openv.filesystem.virtual.mount"]("party.openv.impl.opfs", "/");
 
+        await hydrateSystemRegistryFromIdb(coreRegistry);
         await scaffoldRegistry();
+        await syncSystemRegistryToIdb(coreRegistry);
+        await startSystemRegistryPersistence(coreRegistry);
         await runUpdater();
         await applyBridgeConfig();
 

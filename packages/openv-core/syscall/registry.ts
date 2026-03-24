@@ -1,4 +1,4 @@
-import { ProcessComponent, REGISTRY_READ_NAMESPACE, REGISTRY_READ_NAMESPACE_VERSIONED, REGISTRY_WRITE_NAMESPACE, REGISTRY_WRITE_NAMESPACE_VERSIONED, RegistryReadComponent, RegistryValue, RegistryWriteComponent, SystemComponent } from "@openv-project/openv-api";
+import { ProcessComponent, REGISTRY_READ_NAMESPACE, REGISTRY_READ_NAMESPACE_VERSIONED, REGISTRY_WRITE_NAMESPACE, REGISTRY_WRITE_NAMESPACE_VERSIONED, RegistryEntryWatchEvent, RegistryKeyWatchEvent, RegistryReadComponent, RegistryValue, RegistryWatchEvent, RegistryWatchOptions, RegistryWatcher, RegistryWriteComponent, SystemComponent } from "@openv-project/openv-api";
 import { CoreProcessExt } from "./mod";
 
 const CORE_REGISTRY_EXT_NAMESPACE = "party.openv.impl.registry" as const;
@@ -7,13 +7,17 @@ const CORE_REGISTRY_EXT_NAMESPACE_VERSIONED = `${CORE_REGISTRY_EXT_NAMESPACE}/0.
 const WILDCARD = "*" as const;
 
 interface CoreRegistryExt extends SystemComponent<typeof CORE_REGISTRY_EXT_NAMESPACE_VERSIONED, typeof CORE_REGISTRY_EXT_NAMESPACE> {
-    ["party.openv.impl.registry.preWatchEntry"](key: string, entry: string, handler: (value: RegistryValue | null) => Promise<void>): Promise<void>;
-    ["party.openv.impl.registry.preWatchDefault"](key: string, handler: (value: RegistryValue | null) => Promise<void>): Promise<void>;
+    ["party.openv.impl.registry.preWatchEntry"](key: string, entry: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryEntryWatchEvent>>;
+    ["party.openv.impl.registry.preWatchDefault"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryEntryWatchEvent>>;
+    ["party.openv.impl.registry.preWatchKey"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryKeyWatchEvent>>;
+    ["party.openv.impl.registry.preWatch"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryWatchEvent>>;
 }
 
 export class CoreRegistry implements RegistryReadComponent, RegistryWriteComponent, CoreRegistryExt {
     #store: Map<string, Map<string, RegistryValue>> = new Map();
-    #watchers: Map<string, Set<{ wait: boolean; handler: (value: RegistryValue | null) => Promise<void> | void }>> = new Map();
+    #entryWatchers: Map<string, Set<(event: RegistryEntryWatchEvent) => void>> = new Map();
+    #keyWatchers: Map<string, Set<(event: RegistryKeyWatchEvent) => void>> = new Map();
+    #allWatchers: Map<string, Set<(event: RegistryWatchEvent) => void>> = new Map();
 
     #normalizePath(key: string): string {
         const segments: string[] = [];
@@ -42,8 +46,8 @@ export class CoreRegistry implements RegistryReadComponent, RegistryWriteCompone
         return result;
     }
 
-    #validateEntry(entry: string): void {
-        if (entry === WILDCARD) {
+    #validateEntry(entry: string, allowWildcard = false): void {
+        if (!allowWildcard && entry === WILDCARD) {
             throw new Error(`Registry entry name "${WILDCARD}" is reserved and cannot be used directly.`);
         }
     }
@@ -67,56 +71,101 @@ export class CoreRegistry implements RegistryReadComponent, RegistryWriteCompone
         return entries;
     }
 
-    #watchKeysFor(normalizedKey: string, entry: string): string[] {
-        const keys = [`${normalizedKey}\0${entry}`];
-        const wildcardKey = `${normalizedKey}\0${WILDCARD}`;
-        if (this.#watchers.has(wildcardKey)) keys.push(wildcardKey);
-        return keys;
+    #entryWatchMapKey(normalizedKey: string, entry: string, recursive: boolean): string {
+        return `${recursive ? "r" : "d"}\0${normalizedKey}\0${entry}`;
     }
 
-    async #notifyWatchers(normalizedKey: string, entry: string, value: RegistryValue | null): Promise<void> {
-        for (const watchKey of this.#watchKeysFor(normalizedKey, entry)) {
-            const callbacks = this.#watchers.get(watchKey);
-            if (!callbacks) continue;
-            for (const cb of callbacks) {
-                if (cb.wait) {
-                    await cb.handler(value);
-                } else {
-                    cb.handler(value);
-                }
+    #keyWatchMapKey(normalizedKey: string, recursive: boolean): string {
+        return `${recursive ? "r" : "d"}\0${normalizedKey}`;
+    }
+
+    #entryWatchKeysFor(normalizedKey: string, entry: string): string[] {
+        const keys = new Set<string>();
+        for (const ancestor of this.#ancestry(normalizedKey)) {
+            const isSelf = ancestor === normalizedKey;
+            const recursiveModes = isSelf ? [false, true] : [true];
+            for (const recursive of recursiveModes) {
+                keys.add(this.#entryWatchMapKey(ancestor, entry, recursive));
+                keys.add(this.#entryWatchMapKey(ancestor, WILDCARD, recursive));
+            }
+        }
+        return [...keys];
+    }
+
+    #keyWatchKeysFor(normalizedKey: string): string[] {
+        const keys = new Set<string>();
+        for (const ancestor of this.#ancestry(normalizedKey)) {
+            const isSelf = ancestor === normalizedKey;
+            const recursiveModes = isSelf ? [false, true] : [true];
+            for (const recursive of recursiveModes) {
+                keys.add(this.#keyWatchMapKey(ancestor, recursive));
+            }
+        }
+        return [...keys];
+    }
+
+    async #notifyEntryWatchers(normalizedKey: string, entry: string, value: RegistryValue | null): Promise<void> {
+        const event: RegistryEntryWatchEvent = { kind: "entry", key: normalizedKey, entry, value };
+        for (const watchKey of this.#entryWatchKeysFor(normalizedKey, entry)) {
+            const callbacks = this.#entryWatchers.get(watchKey);
+            if (callbacks) {
+                for (const cb of callbacks) cb(event);
+            }
+        }
+
+        for (const watchKey of this.#keyWatchKeysFor(normalizedKey)) {
+            const callbacks = this.#allWatchers.get(watchKey);
+            if (callbacks) {
+                for (const cb of callbacks) cb(event);
             }
         }
     }
 
-    #makeWatchIterable(watchKey: string): { changes: AsyncIterable<RegistryValue | null>; abort: () => Promise<void> } {
-        if (!this.#watchers.has(watchKey)) {
-            this.#watchers.set(watchKey, new Set());
+    async #notifyKeyWatchers(normalizedKey: string, created: boolean): Promise<void> {
+        const event: RegistryKeyWatchEvent = { kind: "key", key: normalizedKey, created };
+        for (const watchKey of this.#keyWatchKeysFor(normalizedKey)) {
+            const keyCallbacks = this.#keyWatchers.get(watchKey);
+            if (keyCallbacks) {
+                for (const cb of keyCallbacks) cb(event);
+            }
+
+            const allCallbacks = this.#allWatchers.get(watchKey);
+            if (allCallbacks) {
+                for (const cb of allCallbacks) cb(event);
+            }
         }
-        const callbacks = this.#watchers.get(watchKey)!;
+    }
+
+    #makeWatchIterable<T>(watchers: Map<string, Set<(event: T) => void>>, watchKey: string): RegistryWatcher<T> {
+        if (!watchers.has(watchKey)) {
+            watchers.set(watchKey, new Set());
+        }
+        const callbacks = watchers.get(watchKey)!;
 
         let aborted = false;
-        const buffer: (RegistryValue | null)[] = [];
-        let notify: ((result: IteratorResult<RegistryValue | null>) => void) | null = null;
+        const buffer: T[] = [];
+        let notify: ((result: IteratorResult<T>) => void) | null = null;
 
-        const callback = {
-            wait: false,
-            handler: (value: RegistryValue | null) => {
-                if (aborted) return;
-                if (notify) {
-                    const n = notify;
-                    notify = null;
-                    n({ value, done: false });
-                } else {
-                    buffer.push(value);
-                }
+        const callback = (value: T) => {
+            if (aborted) return;
+            if (notify) {
+                const n = notify;
+                notify = null;
+                n({ value, done: false });
+            } else {
+                buffer.push(value);
             }
         };
 
         callbacks.add(callback);
 
         const cleanup = () => {
+            if (aborted) return;
             aborted = true;
             callbacks.delete(callback);
+            if (callbacks.size === 0) {
+                watchers.delete(watchKey);
+            }
             if (notify) {
                 const n = notify;
                 notify = null;
@@ -124,19 +173,19 @@ export class CoreRegistry implements RegistryReadComponent, RegistryWriteCompone
             }
         };
 
-        const changes: AsyncIterable<RegistryValue | null> = {
+        const changes: AsyncIterable<T> = {
             [Symbol.asyncIterator]() {
                 return {
-                    next(): Promise<IteratorResult<RegistryValue | null>> {
+                    next(): Promise<IteratorResult<T>> {
                         if (buffer.length > 0) {
                             return Promise.resolve({ value: buffer.shift()!, done: false });
                         }
                         if (aborted) {
                             return Promise.resolve({ value: undefined as any, done: true });
                         }
-                        return new Promise<IteratorResult<RegistryValue | null>>(r => { notify = r; });
+                        return new Promise<IteratorResult<T>>(r => { notify = r; });
                     },
-                    return(): Promise<IteratorResult<RegistryValue | null>> {
+                    return(): Promise<IteratorResult<T>> {
                         cleanup();
                         return Promise.resolve({ value: undefined as any, done: true });
                     }
@@ -148,7 +197,7 @@ export class CoreRegistry implements RegistryReadComponent, RegistryWriteCompone
     }
 
     ["party.openv.registry.read.readEntry"](key: string, entry: string): Promise<RegistryValue | null> {
-        if (entry === WILDCARD) return Promise.resolve(null); // wildcard is not a real entry
+        this.#validateEntry(entry);
         const norm = this.#normalizePath(key);
         const entries = this.#getEntries(norm);
         if (!entries) return Promise.resolve(null);
@@ -193,35 +242,48 @@ export class CoreRegistry implements RegistryReadComponent, RegistryWriteCompone
         return Promise.resolve(this.#store.has(norm));
     }
 
-    ["party.openv.registry.read.watchEntry"](key: string, entry: string): Promise<{
-        changes: AsyncIterable<RegistryValue | null>;
-        abort: () => Promise<void>;
-    }> {
+    ["party.openv.registry.read.watchEntry"](key: string, entry: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryEntryWatchEvent>> {
+        this.#validateEntry(entry, true);
         const norm = this.#normalizePath(key);
-        const watchKey = entry === WILDCARD
-            ? `${norm}\0${WILDCARD}`
-            : `${norm}\0${entry}`;
-        return Promise.resolve(this.#makeWatchIterable(watchKey));
+        const watchKey = this.#entryWatchMapKey(norm, entry, Boolean(options?.recursive));
+        return Promise.resolve(this.#makeWatchIterable(this.#entryWatchers, watchKey));
     }
 
-    ["party.openv.registry.read.watchDefault"](key: string): Promise<{
-        changes: AsyncIterable<RegistryValue | null>;
-        abort: () => Promise<void>;
-    }> {
-        return this["party.openv.registry.read.watchEntry"](key, "");
+    ["party.openv.registry.read.watchDefault"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryEntryWatchEvent>> {
+        return this["party.openv.registry.read.watchEntry"](key, "", options);
+    }
+
+    ["party.openv.registry.read.watchKey"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryKeyWatchEvent>> {
+        const norm = this.#normalizePath(key);
+        const watchKey = this.#keyWatchMapKey(norm, Boolean(options?.recursive));
+        return Promise.resolve(this.#makeWatchIterable(this.#keyWatchers, watchKey));
+    }
+
+    ["party.openv.registry.read.watch"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryWatchEvent>> {
+        const norm = this.#normalizePath(key);
+        const watchKey = this.#keyWatchMapKey(norm, Boolean(options?.recursive));
+        return Promise.resolve(this.#makeWatchIterable(this.#allWatchers, watchKey));
     }
 
     async ["party.openv.registry.write.createKey"](key: string): Promise<void> {
         const norm = this.#normalizePath(key);
-        this.#ensureKey(norm);
+        for (const ancestor of this.#ancestry(norm)) {
+            if (!this.#store.has(ancestor)) {
+                this.#store.set(ancestor, new Map());
+                await this.#notifyKeyWatchers(ancestor, true);
+            }
+        }
     }
 
     ["party.openv.registry.write.writeEntry"](key: string, entry: string, value: RegistryValue): Promise<void> {
         this.#validateEntry(entry);
         const norm = this.#normalizePath(key);
-        const entries = this.#ensureKey(norm);
-        entries.set(entry, value);
-        return this.#notifyWatchers(norm, entry, value);
+        return (async () => {
+            await this["party.openv.registry.write.createKey"](norm);
+            const entries = this.#ensureKey(norm);
+            entries.set(entry, value);
+            await this.#notifyEntryWatchers(norm, entry, value);
+        })();
     }
 
     ["party.openv.registry.write.writeDefault"](key: string, value: RegistryValue): Promise<void> {
@@ -233,7 +295,7 @@ export class CoreRegistry implements RegistryReadComponent, RegistryWriteCompone
         const norm = this.#normalizePath(key);
         const entries = this.#requireKey(norm);
         entries.delete(entry);
-        return this.#notifyWatchers(norm, entry, null);
+        return this.#notifyEntryWatchers(norm, entry, null);
     }
 
     async ["party.openv.registry.write.deleteKey"](key: string): Promise<void> {
@@ -250,27 +312,38 @@ export class CoreRegistry implements RegistryReadComponent, RegistryWriteCompone
             if (entries) {
                 for (const entry of entries.keys()) {
                     if (entry === WILDCARD) continue;
-                    await this.#notifyWatchers(k, entry, null);
+                    await this.#notifyEntryWatchers(k, entry, null);
                 }
             }
         }
 
-        for (const k of toDelete) this.#store.delete(k);
-    }
-
-    async ["party.openv.impl.registry.preWatchEntry"](key: string, entry: string, handler: (value: RegistryValue | null) => Promise<void>): Promise<void> {
-        const norm = this.#normalizePath(key);
-        const watchKey = entry === WILDCARD
-            ? `${norm}\0${WILDCARD}`
-            : `${norm}\0${entry}`;
-        if (!this.#watchers.has(watchKey)) {
-            this.#watchers.set(watchKey, new Set());
+        for (const k of toDelete) {
+            this.#store.delete(k);
+            await this.#notifyKeyWatchers(k, false);
         }
-        this.#watchers.get(watchKey)!.add({ wait: true, handler });
     }
 
-    async ["party.openv.impl.registry.preWatchDefault"](key: string, handler: (value: RegistryValue | null) => Promise<void>): Promise<void> {
-        return this["party.openv.impl.registry.preWatchEntry"](key, "", handler);
+    async ["party.openv.impl.registry.preWatchEntry"](key: string, entry: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryEntryWatchEvent>> {
+        this.#validateEntry(entry, true);
+        const norm = this.#normalizePath(key);
+        const watchKey = this.#entryWatchMapKey(norm, entry, Boolean(options?.recursive));
+        return this.#makeWatchIterable(this.#entryWatchers, watchKey);
+    }
+
+    async ["party.openv.impl.registry.preWatchDefault"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryEntryWatchEvent>> {
+        return this["party.openv.impl.registry.preWatchEntry"](key, "", options);
+    }
+
+    async ["party.openv.impl.registry.preWatchKey"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryKeyWatchEvent>> {
+        const norm = this.#normalizePath(key);
+        const watchKey = this.#keyWatchMapKey(norm, Boolean(options?.recursive));
+        return this.#makeWatchIterable(this.#keyWatchers, watchKey);
+    }
+
+    async ["party.openv.impl.registry.preWatch"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryWatchEvent>> {
+        const norm = this.#normalizePath(key);
+        const watchKey = this.#keyWatchMapKey(norm, Boolean(options?.recursive));
+        return this.#makeWatchIterable(this.#allWatchers, watchKey);
     }
 
     async supports(ns: typeof REGISTRY_READ_NAMESPACE | typeof REGISTRY_READ_NAMESPACE_VERSIONED): Promise<typeof REGISTRY_READ_NAMESPACE_VERSIONED>;
@@ -455,20 +528,24 @@ export class ProcessScopedRegistry implements RegistryReadComponent, RegistryWri
         return this.#system["party.openv.registry.read.keyExists"](key);
     }
 
-    async ["party.openv.registry.read.watchEntry"](key: string, entry: string): Promise<{
-        changes: AsyncIterable<RegistryValue | null>;
-        abort: () => Promise<void>;
-    }> {
+    async ["party.openv.registry.read.watchEntry"](key: string, entry: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryEntryWatchEvent>> {
         await this.#checkAccess(key, "read");
-        return this.#system["party.openv.registry.read.watchEntry"](key, entry);
+        return this.#system["party.openv.registry.read.watchEntry"](key, entry, options);
     }
 
-    async ["party.openv.registry.read.watchDefault"](key: string): Promise<{
-        changes: AsyncIterable<RegistryValue | null>;
-        abort: () => Promise<void>;
-    }> {
+    async ["party.openv.registry.read.watchDefault"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryEntryWatchEvent>> {
         await this.#checkAccess(key, "read");
-        return this.#system["party.openv.registry.read.watchDefault"](key);
+        return this.#system["party.openv.registry.read.watchDefault"](key, options);
+    }
+
+    async ["party.openv.registry.read.watchKey"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryKeyWatchEvent>> {
+        await this.#checkAccess(key, "read");
+        return this.#system["party.openv.registry.read.watchKey"](key, options);
+    }
+
+    async ["party.openv.registry.read.watch"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryWatchEvent>> {
+        await this.#checkAccess(key, "read");
+        return this.#system["party.openv.registry.read.watch"](key, options);
     }
 
     async ["party.openv.registry.write.createKey"](key: string): Promise<void> {

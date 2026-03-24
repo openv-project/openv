@@ -2,6 +2,30 @@ import type { SystemComponent } from "./mod.ts";
 
 export type RegistryValue = string | number | boolean | ArrayBuffer;
 
+export type RegistryWatchOptions = {
+    recursive?: boolean;
+};
+
+export type RegistryEntryWatchEvent = {
+    kind: "entry";
+    key: string;
+    entry: string;
+    value: RegistryValue | null;
+};
+
+export type RegistryKeyWatchEvent = {
+    kind: "key";
+    key: string;
+    created: boolean;
+};
+
+export type RegistryWatchEvent = RegistryEntryWatchEvent | RegistryKeyWatchEvent;
+
+export type RegistryWatcher<T> = {
+    changes: AsyncIterable<T>;
+    abort: () => Promise<void>;
+};
+
 export const REGISTRY_READ_NAMESPACE = "party.openv.registry.read" as const;
 export const REGISTRY_READ_NAMESPACE_VERSIONED = `${REGISTRY_READ_NAMESPACE}/0.1.0` as const;
 export const REGISTRY_WRITE_NAMESPACE = "party.openv.registry.write" as const;
@@ -90,43 +114,33 @@ export interface RegistryReadComponent extends SystemComponent<typeof REGISTRY_R
     ["party.openv.registry.read.keyExists"](key: string): Promise<boolean>;
 
     /**
-     * Watches for changes to a specific registry entry. This is very powerful for reactive applications.
+     * Watches for changes to a specific registry entry.
      * @param key The key to watch, specified as a path string (e.g. "/System/Boot")
-     * @param entry The name of the entry to watch (e.g. "LogLevel")
-     * @returns An object containing an async iterable of changes to the entry, and an abort function to stop watching
-     * 
-     * @example
-     * const watcher = await system["party.openv.registry.watchEntry"]("/System/Boot", "LogLevel");
-     * (async () => {
-     *     for await (const newValue of watcher.changes) {
-     *         console.log("LogLevel changed to:", newValue);
-     *         // ... reconfigure logger
-     *     }
-     * })();
+     * @param entry The name of the entry to watch (e.g. "LogLevel") or "*" for all entries
+     * @param options Optional watch behavior, including recursive watches for matching subkeys
      */
-    ["party.openv.registry.read.watchEntry"](key: string, entry: string): Promise<{
-        changes: AsyncIterable<RegistryValue | null>;
-        abort: () => Promise<void>;
-    }>;
+    ["party.openv.registry.read.watchEntry"](key: string, entry: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryEntryWatchEvent>>;
 
     /**
-     * Watches for changes to the default entry of a specific registry key. This is very powerful for reactive applications.
+     * Watches for changes to the default entry of a specific registry key.
      * @param key The key to watch, specified as a path string (e.g. "/System/Boot")
-     * @returns An object containing an async iterable of changes to the default entry, and an abort function to stop watching
-     * 
-     * @example
-     * const watcher = await system["party.openv.registry.watchDefault"]("/System/Boot");
-     * (async () => {
-     *     for await (const newValue of watcher.changes) {
-     *         console.log("Default boot configuration changed to:", newValue);
-     *         // ... remind user to reboot system for changes to take effect
-     *     }
-     * })();
+     * @param options Optional watch behavior, including recursive watches for matching subkeys
      */
-    ["party.openv.registry.read.watchDefault"](key: string): Promise<{
-        changes: AsyncIterable<RegistryValue | null>;
-        abort: () => Promise<void>;
-    }>;
+    ["party.openv.registry.read.watchDefault"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryEntryWatchEvent>>;
+
+    /**
+     * Watches key create/delete events at a key path.
+     * @param key The key to watch, specified as a path string (e.g. "/System")
+     * @param options Optional watch behavior, including recursive watches for matching subkeys
+     */
+    ["party.openv.registry.read.watchKey"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryKeyWatchEvent>>;
+
+    /**
+     * Watches both entry changes and key create/delete events.
+     * @param key The key to watch, specified as a path string (e.g. "/System")
+     * @param options Optional watch behavior, including recursive watches for matching subkeys
+     */
+    ["party.openv.registry.read.watch"](key: string, options?: RegistryWatchOptions): Promise<RegistryWatcher<RegistryWatchEvent>>;
 }
 
 /**
