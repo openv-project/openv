@@ -38,6 +38,16 @@ function isBinaryLike(value: unknown): boolean {
     return isArrayBufferLike(value) || ArrayBuffer.isView(value as any) || isBlobLike(value);
 }
 
+function isDirectoryHandle(handle: unknown): handle is FileSystemDirectoryHandle {
+    return !!(
+        handle &&
+        typeof handle === 'object' &&
+        (handle as any).kind === 'directory' &&
+        typeof (handle as any).getDirectoryHandle === 'function' &&
+        typeof (handle as any).getFileHandle === 'function'
+    );
+}
+
 export class CoreSystemLinkPeer implements SystemLinkPeer {
     #functions: Record<string, (...args: PlainParameter[]) => Promise<PlainParameter | void>> = {};
     #transport: SystemLinkTransport | null = null;
@@ -58,7 +68,10 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
     }
 
     #handleOutgoingArg(arg: PlainParameter): SystemLinkParameter {
-        if (typeof arg === "string" || typeof arg === "number" || typeof arg === "boolean" || arg === null) {
+        if (arg === undefined) {
+            return undefined;
+        }
+        if (typeof arg === "string" || typeof arg === "number" || typeof arg === "boolean" || arg === null || isDirectoryHandle(arg)) {
             return { literal: arg };
         }
         if (isBinaryLike(arg)) {
@@ -140,22 +153,23 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
                 }
             };
 
-            const iterable: AsyncIterable<PlainParameter> = {
+            const peer = this;
+            const iterable: AsyncIterable<SystemLinkParameter> = {
                 [Symbol.asyncIterator]() {
                     return {
-                        next(): Promise<IteratorResult<PlainParameter>> {
-                            const consume = (): Promise<IteratorResult<PlainParameter>> => {
+                        next(): Promise<IteratorResult<SystemLinkParameter>> {
+                            const consume = (): Promise<IteratorResult<SystemLinkParameter>> => {
                                 if (queue.length > 0) {
                                     const item = queue.shift()!;
                                     if (item.done) {
-                                        return Promise.resolve({ value: undefined, done: true });
+                                        return Promise.resolve({ value: undefined as any, done: true });
                                     }
                                     if (item.err) {
                                         return Promise.reject(new Error(item.err));
                                     }
-                                    return Promise.resolve({ value: item.value, done: false });
+                                    return Promise.resolve({ value: item.value as SystemLinkParameter, done: false });
                                 }
-                                return new Promise<IteratorResult<PlainParameter>>((res, rej) => {
+                                return new Promise<IteratorResult<SystemLinkParameter>>((res, rej) => {
                                     notify = () => {
                                         notify = null;
                                         consume().then(res, rej);
@@ -164,27 +178,25 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
                             };
                             return consume();
                         },
-                        return(): Promise<IteratorResult<PlainParameter>> {
+                        return(): Promise<IteratorResult<SystemLinkParameter>> {
                             delete (this as any).#streams?.[streamId];
-                            return Promise.resolve({ value: undefined, done: true });
+                            return Promise.resolve({ value: undefined as any, done: true });
                         }
                     };
                 }
             };
 
-            const peer = this;
             return {
                 [Symbol.asyncIterator]() {
                     const inner = iterable[Symbol.asyncIterator]();
                     return {
                         async next(): Promise<IteratorResult<PlainParameter>> {
                             const result = await inner.next();
-                            if (result.done) return { value: undefined, done: true };
-                            // result.value is still a raw SystemLinkParameter here
-                            return {
-                                value: peer.#systemLinkToPlain(result.value as SystemLinkParameter),
+                            if (result.done) return { value: undefined as any, done: true };
+                            return Promise.resolve({
+                                value: peer.#systemLinkToPlain(result.value),
                                 done: false
-                            };
+                            }) as Promise<IteratorResult<PlainParameter>>;
                         },
                         return(): Promise<IteratorResult<PlainParameter>> {
                             delete peer.#streams[streamId];
@@ -196,25 +208,25 @@ export class CoreSystemLinkPeer implements SystemLinkPeer {
         }
         if ("literal" in param) {
             const lit = param.literal;
-            if (typeof lit === "string" || typeof lit === "number" || typeof lit === "boolean" || lit === null) {
-                return lit;
+            if (typeof lit === "string" || typeof lit === "number" || typeof lit === "boolean" || lit === null || isDirectoryHandle(lit)) {
+                return lit as PlainParameter;
             }
             if (isBinaryLike(lit)) {
-                return lit;
+                return lit as PlainParameter;
             }
             const recoveredBytes = maybeTypedArrayLikeObject(lit);
             if (recoveredBytes) {
                 return recoveredBytes;
             }
             if (Array.isArray(lit)) {
-                return lit.map(item => this.#systemLinkToPlain(item));
+                return lit.map(item => this.#systemLinkToPlain(item)) as PlainParameter;
             }
             if (typeof lit === "object") {
                 const obj: Record<string, PlainParameter> = {};
                 for (const [k, v] of Object.entries(lit)) {
                     obj[k] = this.#systemLinkToPlain(v as SystemLinkParameter);
                 }
-                return obj;
+                return obj as PlainParameter;
             }
         }
         if ("method" in param) {

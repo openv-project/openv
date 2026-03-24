@@ -46,6 +46,7 @@ export class TmpFs {
         system["party.openv.filesystem.virtual.onrmdir"](TMPFS_NAMESPACE,
             async (path: string) => await this.rmdir(normalizePath(path))
         );
+        // we dont care about any extra params
         system["party.openv.filesystem.virtual.onmount"](TMPFS_NAMESPACE,
             async (path: string) => await this.mount(normalizePath(path))
         );

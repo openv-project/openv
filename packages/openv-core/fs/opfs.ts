@@ -1,4 +1,4 @@
-import type { FileMode, FileSystemVirtualComponent, FsStats, OpenFlags } from "@openv-project/openv-api";
+import type { FileMode, FileSystemVirtualComponent, FsStats, OpenFlags, PlainParameter } from "@openv-project/openv-api";
 
 export const OPFS_NAMESPACE = "party.openv.impl.opfs" as const;
 
@@ -22,6 +22,13 @@ type OpenFileState = {
 	path: string;
 	flags: OpenFlags;
 	position: number;
+};
+
+// Per-mount internal state for namespace isolation
+type MountState = {
+	rootHandle: FileSystemDirectoryHandle;
+	dirCache: Map<string, FileSystemDirectoryHandle>;
+	rootEntry: FsStats<typeof OPFS_NAMESPACE>;
 };
 
 function normalizePath(path: string): string {
@@ -114,16 +121,14 @@ function defaultEntry(type: "DIRECTORY" | "FILE", mode: FileMode): AttrEntry {
 }
 
 export class OPFS {
-	#mountRoots = new Map<string, FileSystemDirectoryHandle>();
+	#mountStates = new Map<string, MountState>();
 	#roots = new Set<string>();
-	#rootEntries = new Map<string, FsStats<typeof OPFS_NAMESPACE>>();
 
 	#openFiles: Map<number, OpenFileState> = new Map();
 
-	#dirCache = new Map<string, FileSystemDirectoryHandle>();
-
 	#defaultRootPromise: Promise<FileSystemDirectoryHandle | null>;
 	#nextRootPromise: Promise<FileSystemDirectoryHandle | null>;
+	#nextMountPath: string | null = null;
 
 	#encoder = new TextEncoder();
 
@@ -150,6 +155,14 @@ export class OPFS {
 		this.#nextRootPromise = Promise.resolve(dirHandle);
 	}
 
+	/**
+	 * Sets the path that the next root will be mounted at.
+	 * This enables proper per-mount namespace isolation.
+	 */
+	setNextMountPath(path: string): void {
+		this.#nextMountPath = path;
+	}
+
 	async register(system: FileSystemVirtualComponent): Promise<void> {
 		await system["party.openv.filesystem.virtual.create"](OPFS_NAMESPACE);
 		await system["party.openv.filesystem.virtual.onstat"](OPFS_NAMESPACE,
@@ -165,7 +178,7 @@ export class OPFS {
 			async (path: string) => await this.rmdir(normalizePath(path))
 		);
 		await system["party.openv.filesystem.virtual.onmount"](OPFS_NAMESPACE,
-			async (path: string) => await this.mount(normalizePath(path))
+			async (path: string, extra?: PlainParameter) => await this.mount(normalizePath(path), extra as any)
 		);
 		await system["party.openv.filesystem.virtual.onunmount"](OPFS_NAMESPACE,
 			async (path: string) => await this.unmount(normalizePath(path))
@@ -204,7 +217,19 @@ export class OPFS {
 		return closest;
 	}
 
-	async mount(path: string): Promise<void> {
+	async mount(path: string, extra?: "opfs" | FileSystemDirectoryHandle): Promise<void> {
+		if (extra !== undefined) {
+			if (extra === "opfs") {
+				const root = await this.#tryGetNavigatorRoot();
+				if (!root) throw new Error("OPFS root is unavailable on this platform.");
+				this.setRoot(root);
+			} else {
+				if (!(extra instanceof FileSystemDirectoryHandle)) {
+					throw new Error("invalid extra parameter for OPFS mount");
+				}
+				this.setRoot(extra);
+			}
+		};
 		const root = await this.#nextRootPromise;
 		this.#nextRootPromise = this.#defaultRootPromise;
 
@@ -212,39 +237,42 @@ export class OPFS {
 			throw new Error("OPFS root is unavailable. Call setRoot(directoryHandle) before mounting.");
 		}
 
-		this.#mountRoots.set(path, root);
-		this.#roots.add(path);
+		const mountPath = path;
+		this.#roots.add(mountPath);
 		const t = nowMs();
-		this.#rootEntries.set(path, {
+		const rootEntry: FsStats<typeof OPFS_NAMESPACE> = {
 			type: "DIRECTORY",
 			size: 0,
 			atime: t,
 			mtime: t,
 			ctime: t,
-			name: baseName(path),
+			name: baseName(mountPath),
 			uid: 0,
 			gid: 0,
 			mode: 0o777,
 			node: OPFS_NAMESPACE,
+		};
+
+		// Create isolated per-mount state
+		this.#mountStates.set(mountPath, {
+			rootHandle: root,
+			dirCache: new Map(),
+			rootEntry,
 		});
-		this.#invalidateDirCache(path, "/", true);
 	}
 
 	async unmount(path: string): Promise<void> {
-		if (!this.#mountRoots.has(path)) {
+		if (!this.#mountStates.has(path)) {
 			throw new Error(`ENOENT: mount path not found '${path}'`);
 		}
-		this.#mountRoots.delete(path);
+		this.#mountStates.delete(path);
 		this.#roots.delete(path);
-		this.#rootEntries.delete(path);
 
 		for (const [ofd, state] of this.#openFiles) {
 			if (state.mount === path) {
 				this.#openFiles.delete(ofd);
 			}
 		}
-
-		this.#invalidateDirCache(path, "/", true);
 	}
 
 	async stat(path: string): Promise<FsStats<typeof OPFS_NAMESPACE>> {
@@ -254,9 +282,7 @@ export class OPFS {
 		}
 
 		if (resolved.relativePath === "/") {
-			const entry = this.#rootEntries.get(resolved.mount);
-			if (!entry) throw new Error(`ENOENT: no such file or directory, stat '${path}'`);
-			return entry;
+			return resolved.mountState.rootEntry;
 		}
 
 		const parent = await this.#getDirectoryHandleByRelativePath(resolved.mount, parentPath(resolved.relativePath));
@@ -634,59 +660,69 @@ export class OPFS {
 		}
 	}
 
-	#resolvePath(path: string): { mount: string; relativePath: string } | null {
+	#resolvePath(path: string): { mount: string; mountState: MountState; relativePath: string } | null {
 		const mount = this.closestMountpoint(path);
 		if (!mount) return null;
 
+		const mountState = this.#mountStates.get(mount);
+		if (!mountState) return null;
+
 		if (mount === "/") {
 			const rel = path === "/" ? "/" : normalizePath(path);
-			return { mount, relativePath: rel };
+			return { mount, mountState, relativePath: rel };
 		}
 
 		if (!mountMatches(path, mount)) return null;
 		const suffix = path.slice(mount.length);
 		const rel = suffix === "" ? "/" : normalizePath(suffix);
-		return { mount, relativePath: rel };
+		return { mount, mountState, relativePath: rel };
 	}
 
 	async #getDirectoryHandleByRelativePath(mount: string, relativePath: string): Promise<FileSystemDirectoryHandle> {
-		const cacheKey = `${mount}\0${relativePath}`;
-		const cached = this.#dirCache.get(cacheKey);
-		if (cached) return cached;
-
-		const root = this.#mountRoots.get(mount);
-		if (!root) {
+		const mountState = this.#mountStates.get(mount);
+		if (!mountState) {
 			throw new Error(`ENOENT: mount path not found '${mount}'`);
 		}
 
+		const cacheKey = relativePath;
+		const cached = mountState.dirCache.get(cacheKey);
+		if (cached) return cached;
+
 		if (relativePath === "/") {
-			this.#dirCache.set(cacheKey, root);
-			return root;
+			mountState.dirCache.set(cacheKey, mountState.rootHandle);
+			return mountState.rootHandle;
 		}
 
-		let current = root;
-		for (const part of splitPath(relativePath)) {
-			current = await current.getDirectoryHandle(marshalName(part));
+		let current = mountState.rootHandle;
+		try {
+			for (const part of splitPath(relativePath)) {
+				current = await current.getDirectoryHandle(marshalName(part));
+			}
+		} catch (err) {
+			// Convert FileSystemAPI errors to ENOENT
+			throw new Error(`ENOENT: no such file or directory, stat '${relativePath}'`);
 		}
-		this.#dirCache.set(cacheKey, current);
+		mountState.dirCache.set(cacheKey, current);
 		return current;
 	}
 
 	#invalidateDirCache(mount: string, relativePath: string, descendants: boolean): void {
+		const mountState = this.#mountStates.get(mount);
+		if (!mountState) return;
+
 		const normalized = relativePath === "/" ? "/" : relativePath.replace(/\/+$/, "");
-		const prefix = `${mount}\0${normalized}`;
-		for (const key of this.#dirCache.keys()) {
-			if (key === prefix) {
-				this.#dirCache.delete(key);
+		for (const key of Array.from(mountState.dirCache.keys())) {
+			if (key === normalized) {
+				mountState.dirCache.delete(key);
 				continue;
 			}
 			if (!descendants) continue;
-			if (normalized === "/" && key.startsWith(`${mount}\0/`)) {
-				this.#dirCache.delete(key);
+			if (normalized === "/" && key.startsWith("/")) {
+				mountState.dirCache.delete(key);
 				continue;
 			}
-			if (normalized !== "/" && key.startsWith(`${prefix}/`)) {
-				this.#dirCache.delete(key);
+			if (normalized !== "/" && key.startsWith(`${normalized}/`)) {
+				mountState.dirCache.delete(key);
 			}
 		}
 	}
@@ -766,9 +802,11 @@ export class OPFS {
 	}
 
 	async #touchDirMetadata(mount: string, relativeDirPath: string): Promise<void> {
+		const mountState = this.#mountStates.get(mount);
+		if (!mountState) return;
+
 		if (relativeDirPath === "/") {
-			const root = this.#rootEntries.get(mount);
-			if (root) root.mtime = nowMs();
+			mountState.rootEntry.mtime = nowMs();
 			return;
 		}
 		const parentRel = parentPath(relativeDirPath);

@@ -1,3 +1,4 @@
+import { PlainParameter } from "../mod.ts";
 import type { SystemComponent } from "./mod.ts";
 
 export type OpenFlags = "r" | "a" | "ax" | "a+" | "r+" | "w" | "wx" | "w+" | "wx+"
@@ -169,9 +170,9 @@ export interface FileSystemPipeComponent extends SystemComponent<typeof FS_PIPE_
 export interface FileSystemVirtualComponent extends SystemComponent<typeof FS_VIRTUAL_NAMESPACE_VERSIONED, typeof FS_VIRTUAL_NAMESPACE> {
     ["party.openv.filesystem.virtual.create"](id: string): Promise<void>;
     ["party.openv.filesystem.virtual.destroy"](id: string): Promise<void>;
-    ["party.openv.filesystem.virtual.mount"](id: string, path: string): Promise<void>;
+    ["party.openv.filesystem.virtual.mount"](id: string, path: string, extra?: PlainParameter): Promise<void>;
     ["party.openv.filesystem.virtual.unmount"](path: string): Promise<void>;
-    ["party.openv.filesystem.virtual.onmount"](id: string, handler: (path: string) => Promise<void>): Promise<void>;
+    ["party.openv.filesystem.virtual.onmount"](id: string, handler: (path: string, extra?: PlainParameter) => Promise<void>): Promise<void>;
     ["party.openv.filesystem.virtual.onunmount"](id: string, handler: (path: string) => Promise<void>): Promise<void>;
     /**
      * Register a handler for when a file is opened on this virtual filesystem.

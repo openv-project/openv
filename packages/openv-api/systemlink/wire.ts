@@ -1,4 +1,4 @@
-export type PlainParameter = string | number | boolean | { [key: string]: PlainParameter } | PlainParameter[] | ((...args: PlainParameter[]) => Promise<PlainParameter>) | AsyncIterable<PlainParameter> | BinaryData | void | null | undefined;
+export type PlainParameter = string | number | boolean | { [key: string]: PlainParameter } | PlainParameter[] | ((...args: PlainParameter[]) => Promise<PlainParameter>) | AsyncIterable<PlainParameter> | BinaryData | void | FileSystemDirectoryEntry | null | undefined;
 
 export type BinaryData =
     | Uint8Array
@@ -18,7 +18,7 @@ export type BinaryData =
 
 
 export type SystemLinkParameter = {
-    literal: string | number | boolean | { [key: string]: SystemLinkParameter } | SystemLinkParameter[] | BinaryData | null;
+    literal: string | number | boolean | { [key: string]: SystemLinkParameter } | SystemLinkParameter[] | BinaryData | FileSystemDirectoryHandle | null;
 } | {
     method: string;
 } | { stream: number }

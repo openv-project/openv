@@ -1,8 +1,8 @@
-import { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemSyncComponent, FileSystemVirtualComponent, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_SYNC_NAMESPACE, FS_SYNC_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, ProcessComponent, SystemComponent } from "@openv-project/openv-api"
+import { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemSyncComponent, FileSystemVirtualComponent, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_SYNC_NAMESPACE, FS_SYNC_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, PlainParameter, ProcessComponent, SystemComponent } from "@openv-project/openv-api"
 import { CoreProcessExt } from "./mod";
 
 type VFS = {
-    mount: (path: string) => Promise<void>;
+    mount: (path: string, extra?: PlainParameter) => Promise<void>;
     unmount: (path: string) => Promise<void>;
     open: (path: string, ofd: number, flags: OpenFlags, mode: FileMode) => Promise<void>;
     create: (path: string, mode?: FileMode) => Promise<void>;
@@ -77,12 +77,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         if (!resolved) {
             throw new Error(`No mountpoint found for path "${path}".`);
         }
-        const { id, subpath } = resolved;
+        const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.create) {
             throw new Error(`Virtual filesystem "${id}" does not implement create.`);
         }
-        return provider.create(subpath, mode);
+        return provider.create(path, mode);
     }
     async ["party.openv.filesystem.virtual.oncreate"](id: string, handler: (path: string, mode?: FileMode) => Promise<void>): Promise<void> {
         const provider = this.#vfsTable.get(id);
@@ -131,7 +131,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         this.#mountTable.delete(normalized);
     }
 
-    async ["party.openv.filesystem.virtual.mount"](id: string, path: string): Promise<void> {
+    async ["party.openv.filesystem.virtual.mount"](id: string, path: string, extra?: PlainParameter): Promise<void> {
         if (!this.#vfsTable.has(id)) {
             throw new Error(`Virtual filesystem "${id}" does not exist.`);
         }
@@ -151,7 +151,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
 
         try {
             if (provider.mount) {
-                await provider.mount(normalized);
+                await provider.mount(normalized, extra);
             }
         } catch (err) {
             this.#mountTable.delete(normalized);
@@ -164,12 +164,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         if (!resolved) {
             throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
         }
-        const { id, subpath } = resolved;
+        const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.mkdir) {
             throw new Error(`Virtual filesystem "${id}" does not implement mkdir.`);
         }
-        return provider.mkdir(subpath, mode);
+        return provider.mkdir(path, mode);
     }
 
     async ["party.openv.filesystem.write.rmdir"](path: string): Promise<void> {
@@ -177,12 +177,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         if (!resolved) {
             throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
         }
-        const { id, subpath } = resolved;
+        const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.rmdir) {
             throw new Error(`Virtual filesystem "${id}" does not implement rmdir.`);
         }
-        return provider.rmdir(subpath);
+        return provider.rmdir(path);
     }
 
     async ["party.openv.filesystem.write.rename"](oldPath: string, newPath: string): Promise<void> {
@@ -201,7 +201,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         if (!provider || !provider.rename) {
             throw new Error(`Virtual filesystem "${rOld.id}" does not implement rename.`);
         }
-        return provider.rename(rOld.subpath, rNew.subpath);
+        return provider.rename(oldPath, newPath);
     }
 
     async ["party.openv.filesystem.write.unlink"](path: string): Promise<void> {
@@ -209,12 +209,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         if (!resolved) {
             throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
         }
-        const { id, subpath } = resolved;
+        const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.unlink) {
             throw new Error(`Virtual filesystem "${id}" does not implement unlink.`);
         }
-        return provider.unlink(subpath);
+        return provider.unlink(path);
     }
 
     async ["party.openv.filesystem.read.stat"](path: string): Promise<FsStats> {
@@ -222,12 +222,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         if (!resolved) {
             throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
         }
-        const { id, subpath } = resolved;
+        const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.stat) {
             throw new Error(`Virtual filesystem "${id}" does not implement stat.`);
         }
-        return provider.stat(subpath);
+        return provider.stat(path);
     }
 
     async ["party.openv.filesystem.read.read"](ofd: number, length: number, position?: number): Promise<Uint8Array> {
@@ -251,12 +251,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         if (!resolved) {
             throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
         }
-        const { id, subpath } = resolved;
+        const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.readdir) {
             throw new Error(`Virtual filesystem "${id}" does not implement readdir.`);
         }
-        return provider.readdir(subpath);
+        return provider.readdir(path);
     }
 
     async ["party.openv.filesystem.read.watch"](path: string, options?: { recursive?: boolean; }): Promise<{ events: AsyncIterable<FileSystemEvent>; abort: () => Promise<void>; }> {
@@ -264,12 +264,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         if (!resolved) {
             throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
         }
-        const { id, subpath } = resolved;
+        const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.watch) {
             throw new Error(`Virtual filesystem "${id}" does not implement watch.`);
         }
-        return provider.watch(subpath, options);
+        return provider.watch(path, options);
     }
     // Global open file table. Each entry is an "open file description" (ofd), analogous
     // to the Linux open file table. Process-local file descriptors point into this table.
@@ -290,7 +290,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
         }
 
-        const { id, subpath } = resolved;
+        const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider) {
             throw new Error(`Virtual filesystem "${id}" does not exist.`);
@@ -301,7 +301,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
 
         const providerOpen = provider.open!;
         const ofd = ++this.#ofdCounter;
-        await providerOpen(subpath, ofd, flags, mode);
+        await providerOpen(path, ofd, flags, mode);
         this.#ofdTable.set(ofd, {
             path,
             providerId: id,
@@ -368,7 +368,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         this.#vfsTable.delete(id);
     }
 
-    async ["party.openv.filesystem.virtual.onmount"](id: string, handler: (path: string) => Promise<void>): Promise<void> {
+    async ["party.openv.filesystem.virtual.onmount"](id: string, handler: (path: string, extra?: PlainParameter) => Promise<void>): Promise<void> {
         const vfs = this.#getVfs(id);
         vfs.mount = handler;
     }
@@ -668,11 +668,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     #resolveMountPath(path: string): { id: string; subpath: string } | null {
         if (!path.startsWith("/")) path = "/" + path;
         let bestMount: string | null = null;
+        let hasRoot = false;
+        
         for (const mountPoint of this.#mountTable.keys()) {
             if (mountPoint === "/") {
-                // root matches everything
-                if (bestMount === null) bestMount = mountPoint;
-                continue;
+                hasRoot = true;
+                continue; // Don't set bestMount to root yet; prefer specific mounts
             }
             if (path === mountPoint || path.startsWith(mountPoint + "/")) {
                 if (bestMount === null || mountPoint.length > bestMount.length) {
@@ -680,10 +681,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
                 }
             }
         }
-        // If no specific mount matched but root exists, prefer root
-        if (bestMount === null && this.#mountTable.has("/")) {
+        
+        // Only use root as fallback if no specific mount matched
+        if (bestMount === null && hasRoot) {
             bestMount = "/";
         }
+        
         if (bestMount === null) return null;
         const id = this.#mountTable.get(bestMount)!;
         let sub = "/";
