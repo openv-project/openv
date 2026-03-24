@@ -17,7 +17,6 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event: FetchEvent) => {
-    event.waitUntil(ensureInitialized());
     handleFetch(event);
 });
 
