@@ -123,6 +123,7 @@ function defaultEntry(type: "DIRECTORY" | "FILE", mode: FileMode): AttrEntry {
 export class OPFS {
 	#mountStates = new Map<string, MountState>();
 	#roots = new Set<string>();
+	#opQueue: Promise<void> = Promise.resolve();
 
 	#openFiles: Map<number, OpenFileState> = new Map();
 
@@ -163,46 +164,61 @@ export class OPFS {
 		this.#nextMountPath = path;
 	}
 
+	async #runSerialized<T>(operation: () => Promise<T>): Promise<T> {
+		const previous = this.#opQueue;
+		let release!: () => void;
+		this.#opQueue = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+
+		await previous;
+		try {
+			return await operation();
+		} finally {
+			release();
+		}
+	}
+
 	async register(system: FileSystemVirtualComponent): Promise<void> {
 		await system["party.openv.filesystem.virtual.create"](OPFS_NAMESPACE);
 		await system["party.openv.filesystem.virtual.onstat"](OPFS_NAMESPACE,
-			async (path: string) => await this.stat(normalizePath(path))
+			async (path: string) => await this.#runSerialized(async () => await this.stat(normalizePath(path)))
 		);
 		await system["party.openv.filesystem.virtual.onreaddir"](OPFS_NAMESPACE,
-			async (path: string) => await this.readdir(normalizePath(path))
+			async (path: string) => await this.#runSerialized(async () => await this.readdir(normalizePath(path)))
 		);
 		await system["party.openv.filesystem.virtual.onmkdir"](OPFS_NAMESPACE,
-			async (path: string, mode?: FileMode) => await this.mkdir(normalizePath(path), mode)
+			async (path: string, mode?: FileMode) => await this.#runSerialized(async () => await this.mkdir(normalizePath(path), mode))
 		);
 		await system["party.openv.filesystem.virtual.onrmdir"](OPFS_NAMESPACE,
-			async (path: string) => await this.rmdir(normalizePath(path))
+			async (path: string) => await this.#runSerialized(async () => await this.rmdir(normalizePath(path)))
 		);
 		await system["party.openv.filesystem.virtual.onmount"](OPFS_NAMESPACE,
-			async (path: string, extra?: PlainParameter) => await this.mount(normalizePath(path), extra as any)
+			async (path: string, extra?: PlainParameter) => await this.#runSerialized(async () => await this.mount(normalizePath(path), extra as any))
 		);
 		await system["party.openv.filesystem.virtual.onunmount"](OPFS_NAMESPACE,
-			async (path: string) => await this.unmount(normalizePath(path))
+			async (path: string) => await this.#runSerialized(async () => await this.unmount(normalizePath(path)))
 		);
 		await system["party.openv.filesystem.virtual.onopen"](OPFS_NAMESPACE,
-			async (path: string, ofd: number, flags: OpenFlags, mode: FileMode) => await this.open(normalizePath(path), ofd, flags, mode)
+			async (path: string, ofd: number, flags: OpenFlags, mode: FileMode) => await this.#runSerialized(async () => await this.open(normalizePath(path), ofd, flags, mode))
 		);
 		await system["party.openv.filesystem.virtual.onclose"](OPFS_NAMESPACE,
-			async (ofd: number) => await this.close(ofd)
+			async (ofd: number) => await this.#runSerialized(async () => await this.close(ofd))
 		);
 		await system["party.openv.filesystem.virtual.onread"](OPFS_NAMESPACE,
-			async (ofd: number, length: number, position?: number) => await this.read(ofd, length, position)
+			async (ofd: number, length: number, position?: number) => await this.#runSerialized(async () => await this.read(ofd, length, position))
 		);
 		await system["party.openv.filesystem.virtual.onwrite"](OPFS_NAMESPACE,
-			async (ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null) => await this.write(ofd, buffer, offset, length, position)
+			async (ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null) => await this.#runSerialized(async () => await this.write(ofd, buffer, offset, length, position))
 		);
 		await system["party.openv.filesystem.virtual.oncreate"](OPFS_NAMESPACE,
-			async (path: string, mode?: FileMode) => await this.create(normalizePath(path), mode)
+			async (path: string, mode?: FileMode) => await this.#runSerialized(async () => await this.create(normalizePath(path), mode))
 		);
 		await system["party.openv.filesystem.virtual.onunlink"](OPFS_NAMESPACE,
-			async (path: string) => await this.unlink(normalizePath(path))
+			async (path: string) => await this.#runSerialized(async () => await this.unlink(normalizePath(path)))
 		);
 		await system["party.openv.filesystem.virtual.onrename"](OPFS_NAMESPACE,
-			async (oldPath: string, newPath: string) => await this.rename(normalizePath(oldPath), normalizePath(newPath))
+			async (oldPath: string, newPath: string) => await this.#runSerialized(async () => await this.rename(normalizePath(oldPath), normalizePath(newPath)))
 		);
 	}
 
