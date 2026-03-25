@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 import { CoreSystemLinkPeer, createPostMessageTransport } from "@openv-project/openv-core";
 import { openv } from "./init.ts";
+import { isClientAllowedForPeer } from "./security.ts";
 
 declare const self: ServiceWorkerGlobalScope;
 
@@ -39,6 +40,10 @@ function makeRemoteEndpoint(clientId: string) {
 
 export async function createPeerForClient(clientId: string): Promise<void> {
     if (clientPeers.has(clientId)) return;
+
+    const client = await self.clients.get(clientId);
+    if (!client || !isClientAllowedForPeer(client)) return;
+
     clientPeers.set(clientId, null!);
 
     const transport = createPostMessageTransport(
@@ -62,6 +67,11 @@ export function handleMessage(event: ExtendableMessageEvent): void {
     event.waitUntil((async () => {
         const source = event.source as Client | null;
         if (!source) return;
+        if (!isClientAllowedForPeer(source)) {
+            clientPeers.delete(source.id);
+            clientListeners.delete(source.id);
+            return;
+        }
 
         const clientId = source.id;
 
