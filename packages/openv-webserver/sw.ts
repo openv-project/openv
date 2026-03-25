@@ -2,7 +2,7 @@
 declare const self: ServiceWorkerGlobalScope;
 
 import { coreProcess, ensureInitialized } from "./sw/init.ts";
-import { handleFetch } from "./sw/bridge.ts";
+import { handleBridgeMessage, handleFetch } from "./sw/bridge.ts";
 import { handleMessage, createPeerForClient, pruneDeadClients } from "./sw/peer.ts";
 
 self.addEventListener("install", () => {
@@ -22,6 +22,8 @@ self.addEventListener("fetch", (event: FetchEvent) => {
 
 self.addEventListener("message", (event: ExtendableMessageEvent) => {
     event.waitUntil((async () => {
+        const handledByBridge = await handleBridgeMessage(event);
+        if (handledByBridge) return;
         await ensureInitialized();
         handleMessage(event);
     })());
