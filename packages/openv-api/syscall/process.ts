@@ -17,6 +17,31 @@ export const PROCESS_SIGNAL_NOTIFYEXIT = "party.openv.process.signals.notifyexit
  */
 export const PROCESS_SIGNAL_QUIT = "party.openv.process.signals.quit" as const;
 
+export interface ProcessExecutorInfo {
+    id: string;
+    class: string;
+    ready: boolean;
+    lastPingAt: number | null;
+    failureCount: number;
+}
+
+export interface ProcessSpawnOptions {
+    env?: Record<string, string>;
+    cwd?: string;
+    uid?: number;
+    gid?: number;
+    ppid?: number;
+    stdio?: [stdin?: StdioOption, stdout?: StdioOption, stderr?: StdioOption];
+    /**
+     * Force spawn routing to a specific executor id.
+     */
+    id?: string;
+    /**
+     * Prefer executors in a specific class when id is not provided.
+     */
+    class?: string;
+}
+
 /**
  * Universal process management component, that does not rely on actually being called in a process.
  */
@@ -36,14 +61,7 @@ export interface ProcessComponent extends SystemComponent<typeof PROCESS_NAMESPA
      * @returns The pid of the spawned process. When `stdio` contains `"pipe"` entries,
      * use `party.openv.process.getstdio` to retrieve the parent-side pipe fds.
      */
-    [`party.openv.process.spawn`](command: string, args?: string[], options?: {
-        env?: Record<string, string>,
-        cwd?: string,
-        uid?: number,
-        gid?: number,
-        ppid?: number,
-        stdio?: [stdin?: StdioOption, stdout?: StdioOption, stderr?: StdioOption]
-    }): Promise<number>;
+    [`party.openv.process.spawn`](command: string, args?: string[], options?: ProcessSpawnOptions): Promise<number>;
 
     /**
      * Retrieve the parent-side pipe file descriptors that were created during spawn when
@@ -52,6 +70,26 @@ export interface ProcessComponent extends SystemComponent<typeof PROCESS_NAMESPA
      * process exits and is cleaned up.
      */
     [`party.openv.process.getstdio`](pid: number): Promise<SpawnStdioResult>;
+
+    /**
+     * Ping an executor and return whether it is currently ready.
+     */
+    [`party.openv.process.pingExecutor`](id: string): Promise<boolean>;
+
+    /**
+     * List registered executors and their current health state.
+     */
+    [`party.openv.process.listExecutors`](): Promise<ProcessExecutorInfo[]>;
+
+    /**
+     * Get one executor by id.
+     */
+    [`party.openv.process.getExecutorById`](id: string): Promise<ProcessExecutorInfo | null>;
+
+    /**
+     * Get the executor currently associated with a running process.
+     */
+    [`party.openv.process.getExecutorByPid`](pid: number): Promise<ProcessExecutorInfo | null>;
 
     /**
      * Kill a process without signaling. This will guarantee that the process is killed, as long as the caller has permission to kill the process, which heavily depends on the environment.
@@ -209,6 +247,11 @@ export interface ProcessLocalComponent extends SystemComponent<typeof PROCESS_LO
      * Gets the command line arguments passed to the process. The first argument (args[0]) should be the name of the executable itself, as per convention.
      */
     [`party.openv.process.local.getargs`](): Promise<string[]>;
+
+    /**
+     * Get the executor currently associated with this process.
+     */
+    [`party.openv.process.local.getExecutor`](): Promise<ProcessExecutorInfo | null>;
 
     /**
      * Handle a named signal sent to the process.

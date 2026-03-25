@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 declare const self: ServiceWorkerGlobalScope;
 
-import { ensureInitialized } from "./sw/init.ts";
+import { coreProcess, ensureInitialized } from "./sw/init.ts";
 import { handleFetch } from "./sw/bridge.ts";
 import { handleMessage, createPeerForClient, pruneDeadClients } from "./sw/peer.ts";
 
@@ -34,4 +34,11 @@ self.clients
         for (const client of existingClients) createPeerForClient(client.id);
     });
 
-setInterval(pruneDeadClients, 30_000);
+setInterval(() => {
+    void (async () => {
+        await ensureInitialized();
+        await pruneDeadClients();
+        await coreProcess["party.openv.impl.process.pingExecutors"]().catch(() => { });
+        await coreProcess["party.openv.impl.process.cleanupExecutors"]().catch(() => { });
+    })();
+}, 30_000);

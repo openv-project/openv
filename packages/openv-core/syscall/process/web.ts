@@ -3,14 +3,23 @@ import { CoreFSExt, CoreProcessExt, CoreSystemLinkPeer, createPostMessageTranspo
 
 export type ProcessEnvBuilder = (ctx: ProcessSpawnContext) => Promise<Record<string, Function>>;
 
+export interface WebExecutorRegistrationOptions {
+    id?: string;
+    class?: string;
+}
+
 export async function registerWebExecutor(
     system: FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemReadWriteComponent & FileSystemPipeComponent & CoreFSExt & ProcessComponent & CoreProcessExt,
-    buildEnv: ProcessEnvBuilder
+    buildEnv: ProcessEnvBuilder,
+    options?: WebExecutorRegistrationOptions,
 ): Promise<void> {
     const workers = new Map<number, Worker>();
+    const executorId = options?.id ?? `web-${crypto.randomUUID()}`;
+    const executorClass = options?.class ?? "party.openv.executor.web";
 
-    await system["party.openv.impl.process.onSpawn"](async (ctx) => {
+    await system["party.openv.impl.process.registerExecutor"]({ id: executorId, class: executorClass }, async (ctx) => {
         try {
+            console.debug(`[executor] spawning process with pid=${ctx.pid} using executor '${executorId}'`);
             const worker = new Worker(
                 `/@${ctx.exe}?pid=${ctx.pid}`,
                 { type: "module" }
@@ -73,5 +82,5 @@ export async function registerWebExecutor(
             console.error(`[executor] pid=${ctx.pid} failed to spawn:`, err);
             await system["party.openv.impl.process.exitProcess"](ctx.pid, null).catch(() => { });
         }
-    });
+    }, async () => true);
 }
