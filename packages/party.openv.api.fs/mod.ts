@@ -295,6 +295,11 @@ export default class FsApi implements API<"party.openv.api.filesystem"> {
     }
   }
 
+  async mkfifo(path: string, mode: FileMode = 0o666): Promise<void> {
+    await this.#requireWrite();
+    await this.openv.system["party.openv.filesystem.write.mkfifo"]!(path, mode);
+  }
+
   async #mkdirRecursive(path: string, mode: FileMode): Promise<void> {
     const parts = path.replace(/\/+$/, "").split("/");
     let current = "";

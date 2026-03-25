@@ -1,4 +1,4 @@
-import { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemSyncComponent, FileSystemVirtualComponent, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_SYNC_NAMESPACE, FS_SYNC_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, PlainParameter, ProcessComponent, SystemComponent } from "@openv-project/openv-api"
+import { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemSocketComponent, FileSystemSocketType, FileSystemSyncComponent, FileSystemVirtualComponent, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_SOCKET_NAMESPACE, FS_SOCKET_NAMESPACE_VERSIONED, FS_SYNC_NAMESPACE, FS_SYNC_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, PlainParameter, ProcessComponent, SocketAddress, SystemComponent } from "@openv-project/openv-api"
 import { CoreProcessExt } from "./mod";
 
 type VFS = {
@@ -57,7 +57,7 @@ export interface CoreFSExt extends SystemComponent<typeof CORE_FS_EXT_NAMESPACE_
     ["party.openv.impl.filesystem.createPipeOfd"](bufferSize?: number): Promise<[readOfd: number, writeOfd: number]>;
 }
 
-export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemPipeComponent, FileSystemSyncComponent, CoreFSExt {
+export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemPipeComponent, FileSystemSocketComponent, FileSystemSyncComponent, CoreFSExt {
     async ["party.openv.filesystem.sync.sync"](ofd: number): Promise<void> {
         const entry = this.#ofdTable.get(ofd);
         if (!entry) {
@@ -73,6 +73,10 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     }
 
     async ["party.openv.filesystem.write.create"](path: string, mode?: FileMode): Promise<void> {
+        const normalized = this.#normalizePath(path);
+        if (this.#fifoByPath.has(normalized) || this.#socketPathToId.has(normalized)) {
+            throw new Error(`EEXIST: file already exists, create '${normalized}'`);
+        }
         const resolved = this.#resolveMountPath(path);
         if (!resolved) {
             throw new Error(`No mountpoint found for path "${path}".`);
@@ -84,6 +88,248 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         }
         return provider.create(path, mode);
     }
+
+    async ["party.openv.filesystem.write.mkfifo"](path: string, mode: FileMode = 0o666): Promise<void> {
+        const normalized = this.#normalizePath(path);
+        if (this.#fifoByPath.has(normalized)) {
+            throw new Error(`EEXIST: file already exists, mkfifo '${normalized}'`);
+        }
+        if (await this.#pathExists(normalized)) {
+            throw new Error(`EEXIST: file already exists, mkfifo '${normalized}'`);
+        }
+
+        const fifoId = ++this.#fifoIdCounter;
+        const pipeId = ++this.#pipeIdCounter;
+        this.#pipeTable.set(pipeId, {
+            buffer: new Uint8Array(CoreFS.DEFAULT_PIPE_BUFFER_SIZE),
+            head: 0,
+            tail: 0,
+            readClosed: false,
+            writeClosed: false,
+            pendingReaders: [],
+            pendingWriters: [],
+        });
+
+        const now = Date.now();
+        this.#fifoTable.set(fifoId, {
+            id: fifoId,
+            path: normalized,
+            pipeId,
+            mode: S_IFIFO | (mode & 0o777),
+            uid: 0,
+            gid: 0,
+            ctime: now,
+            mtime: now,
+            atime: now,
+            openReaders: 0,
+            openWriters: 0,
+            pendingOpenReaders: [],
+            pendingOpenWriters: [],
+        });
+        this.#fifoByPath.set(normalized, fifoId);
+    }
+
+    async ["party.openv.filesystem.socket.create"](type: FileSystemSocketType): Promise<number> {
+        if (type !== "stream" && type !== "dgram") {
+            throw new Error(`ENOTSUP: socket type '${type}' is not implemented yet.`);
+        }
+
+        const socketId = ++this.#socketIdCounter;
+        const ofd = ++this.#ofdCounter;
+        const now = Date.now();
+
+        this.#socketTable.set(socketId, {
+            id: socketId,
+            type,
+            boundPath: null,
+            mode: S_IFSOCK | 0o777,
+            uid: 0,
+            gid: 0,
+            ctime: now,
+            mtime: now,
+            atime: now,
+            listening: false,
+            backlog: 16,
+            pendingAcceptedOfds: [],
+            pendingAcceptWaiters: [],
+            openOfds: new Set([ofd]),
+            pendingDatagrams: [],
+            pendingDatagramReaders: [],
+            pendingDatagramWriters: [],
+            datagramQueueLimit: CoreFS.DEFAULT_DGRAM_QUEUE_LIMIT,
+        });
+
+        this.#ofdTable.set(ofd, {
+            path: `<socket:${socketId}>`,
+            flags: "r+",
+            mode: S_IFSOCK | 0o777,
+        });
+
+        this.#ofdToSocket.set(ofd, { socketId });
+        return ofd;
+    }
+
+    async ["party.openv.filesystem.socket.bind"](ofd: number, address: SocketAddress): Promise<void> {
+        const meta = this.#requireSocketOfd(ofd);
+        const socket = this.#requireSocket(meta.socketId);
+        if (meta.readPipeId !== undefined || meta.writePipeId !== undefined) {
+            throw new Error(`EINVAL: connected socket cannot be rebound.`);
+        }
+        if (socket.boundPath) {
+            throw new Error(`EINVAL: socket is already bound to '${socket.boundPath}'.`);
+        }
+
+        const normalized = this.#normalizePath(address.path);
+        if (this.#fifoByPath.has(normalized) || this.#socketPathToId.has(normalized) || await this.#pathExists(normalized)) {
+            throw new Error(`EADDRINUSE: address already in use '${normalized}'`);
+        }
+
+        socket.boundPath = normalized;
+        socket.mtime = Date.now();
+        this.#socketPathToId.set(normalized, socket.id);
+        const entry = this.#ofdTable.get(ofd);
+        if (entry) entry.path = normalized;
+    }
+
+    async ["party.openv.filesystem.socket.listen"](ofd: number, backlog: number = 16): Promise<void> {
+        const meta = this.#requireSocketOfd(ofd);
+        const socket = this.#requireSocket(meta.socketId);
+        if (socket.type !== "stream") throw new Error(`ENOTSUP: only stream sockets are supported in phase 2.`);
+        if (!socket.boundPath) throw new Error(`EINVAL: socket must be bound before listen.`);
+        if (meta.readPipeId !== undefined || meta.writePipeId !== undefined) {
+            throw new Error(`EINVAL: connected socket cannot listen.`);
+        }
+
+        socket.listening = true;
+        socket.backlog = Math.max(1, backlog | 0);
+        socket.mtime = Date.now();
+    }
+
+    async ["party.openv.filesystem.socket.connect"](ofd: number, address: SocketAddress): Promise<void> {
+        const clientMeta = this.#requireSocketOfd(ofd);
+        const clientSocket = this.#requireSocket(clientMeta.socketId);
+        if (clientSocket.type !== "stream") throw new Error(`ENOTSUP: only stream sockets are supported in phase 2.`);
+        if (clientMeta.readPipeId !== undefined || clientMeta.writePipeId !== undefined) {
+            throw new Error(`EISCONN: socket is already connected.`);
+        }
+
+        const normalized = this.#normalizePath(address.path);
+        const serverSocketId = this.#socketPathToId.get(normalized);
+        if (serverSocketId === undefined) {
+            throw new Error(`ECONNREFUSED: no listening socket at '${normalized}'`);
+        }
+
+        const serverSocket = this.#requireSocket(serverSocketId);
+        if (!serverSocket.listening) {
+            throw new Error(`ECONNREFUSED: socket at '${normalized}' is not listening`);
+        }
+
+        while (serverSocket.pendingAcceptedOfds.length >= serverSocket.backlog) {
+            await new Promise<void>((resolve) => serverSocket.pendingAcceptWaiters.push(resolve));
+            if (!this.#socketTable.has(serverSocketId)) {
+                throw new Error(`ECONNREFUSED: listening socket disappeared.`);
+            }
+        }
+
+        const c2s = this.#createPipeState();
+        const s2c = this.#createPipeState();
+
+        clientMeta.readPipeId = s2c;
+        clientMeta.writePipeId = c2s;
+        clientSocket.atime = Date.now();
+        clientSocket.mtime = Date.now();
+
+        const acceptedOfd = ++this.#ofdCounter;
+        this.#ofdTable.set(acceptedOfd, {
+            path: `<socket:${serverSocketId}:accepted>`,
+            flags: "r+",
+            mode: S_IFSOCK | 0o777,
+        });
+        this.#ofdToSocket.set(acceptedOfd, {
+            socketId: serverSocketId,
+            readPipeId: c2s,
+            writePipeId: s2c,
+        });
+        serverSocket.openOfds.add(acceptedOfd);
+        serverSocket.pendingAcceptedOfds.push(acceptedOfd);
+        serverSocket.mtime = Date.now();
+
+        for (const resolve of serverSocket.pendingAcceptWaiters.splice(0)) resolve();
+    }
+
+    async ["party.openv.filesystem.socket.accept"](ofd: number): Promise<number> {
+        const meta = this.#requireSocketOfd(ofd);
+        const socket = this.#requireSocket(meta.socketId);
+        if (!socket.listening) throw new Error(`EINVAL: socket is not listening.`);
+
+        while (socket.pendingAcceptedOfds.length === 0) {
+            await new Promise<void>((resolve) => socket.pendingAcceptWaiters.push(resolve));
+            if (!this.#socketTable.has(socket.id)) {
+                throw new Error(`ECONNABORTED: listening socket closed.`);
+            }
+        }
+
+        const accepted = socket.pendingAcceptedOfds.shift()!;
+        return accepted;
+    }
+
+    async ["party.openv.filesystem.socket.sendto"](_ofd: number, _data: Uint8Array, _address: SocketAddress): Promise<number> {
+        const meta = this.#requireSocketOfd(_ofd);
+        const sender = this.#requireSocket(meta.socketId);
+        if (sender.type !== "dgram") {
+            throw new Error("ENOTSUP: sendto is only available for datagram sockets.");
+        }
+
+        const normalized = this.#normalizePath(_address.path);
+        const targetId = this.#socketPathToId.get(normalized);
+        if (targetId === undefined) {
+            throw new Error(`ECONNREFUSED: no datagram socket at '${normalized}'`);
+        }
+
+        const target = this.#requireSocket(targetId);
+        if (target.type !== "dgram") {
+            throw new Error(`EPROTOTYPE: destination '${normalized}' is not a datagram socket.`);
+        }
+
+        while (target.pendingDatagrams.length >= target.datagramQueueLimit) {
+            await new Promise<void>((resolve) => target.pendingDatagramWriters.push(resolve));
+            if (!this.#socketTable.has(target.id)) {
+                throw new Error("ECONNREFUSED: destination socket closed while waiting for queue space.");
+            }
+        }
+
+        target.pendingDatagrams.push({
+            data: _data.slice(),
+            address: sender.boundPath ? { path: sender.boundPath } : null,
+        });
+        target.mtime = Date.now();
+        for (const resolve of target.pendingDatagramReaders.splice(0)) resolve();
+        return _data.byteLength;
+    }
+
+    async ["party.openv.filesystem.socket.recvfrom"](_ofd: number, _maxLength: number): Promise<{ data: Uint8Array; address: SocketAddress | null }> {
+        const meta = this.#requireSocketOfd(_ofd);
+        const socket = this.#requireSocket(meta.socketId);
+        if (socket.type !== "dgram") {
+            throw new Error("ENOTSUP: recvfrom is only available for datagram sockets.");
+        }
+
+        while (socket.pendingDatagrams.length === 0) {
+            await new Promise<void>((resolve) => socket.pendingDatagramReaders.push(resolve));
+            if (!this.#socketTable.has(socket.id)) {
+                throw new Error("ECONNABORTED: socket closed while waiting for datagram.");
+            }
+        }
+
+        const packet = socket.pendingDatagrams.shift()!;
+        socket.atime = Date.now();
+        for (const resolve of socket.pendingDatagramWriters.splice(0)) resolve();
+        const data = packet.data.byteLength > _maxLength
+            ? packet.data.slice(0, _maxLength)
+            : packet.data;
+        return { data, address: packet.address };
+    }
+
     async ["party.openv.filesystem.virtual.oncreate"](id: string, handler: (path: string, mode?: FileMode) => Promise<void>): Promise<void> {
         const provider = this.#vfsTable.get(id);
         if (!provider) {
@@ -95,8 +341,25 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     async ["party.openv.filesystem.write.write"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<number> {
         // Check pipe table first
         const pipeInfo = this.#ofdToPipe.get(ofd);
-        if (pipeInfo && pipeInfo.role === "write") {
-            return this.#pipeWrite(pipeInfo.pipeId, buffer, offset, length);
+        if (pipeInfo) {
+            if (pipeInfo.kind === "anon") {
+                if (pipeInfo.role !== "write") {
+                    throw new Error(`OFD ${ofd} is not writable.`);
+                }
+                return this.#pipeWrite(pipeInfo.pipeId, buffer, offset, length);
+            }
+            if (!pipeInfo.canWrite) {
+                throw new Error(`OFD ${ofd} is not writable.`);
+            }
+            return this.#fifoWrite(pipeInfo.fifoId, buffer, offset, length);
+        }
+
+        const socketInfo = this.#ofdToSocket.get(ofd);
+        if (socketInfo) {
+            if (socketInfo.writePipeId === undefined) {
+                throw new Error(`ENOTCONN: socket OFD ${ofd} is not connected for write.`);
+            }
+            return this.#pipeWrite(socketInfo.writePipeId, buffer, offset, length);
         }
 
         const entry = this.#ofdTable.get(ofd);
@@ -160,6 +423,10 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     }
 
     async ["party.openv.filesystem.write.mkdir"](path: string, mode?: FileMode): Promise<void> {
+        const normalized = this.#normalizePath(path);
+        if (this.#fifoByPath.has(normalized) || this.#socketPathToId.has(normalized)) {
+            throw new Error(`EEXIST: file already exists, mkdir '${normalized}'`);
+        }
         const resolved = this.#resolveMountPath(path);
         if (!resolved) {
             throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
@@ -186,6 +453,34 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     }
 
     async ["party.openv.filesystem.write.rename"](oldPath: string, newPath: string): Promise<void> {
+        const oldNormalized = this.#normalizePath(oldPath);
+        const newNormalized = this.#normalizePath(newPath);
+        const fifoId = this.#fifoByPath.get(oldNormalized);
+        if (fifoId !== undefined) {
+            if (this.#fifoByPath.has(newNormalized) || await this.#pathExists(newNormalized)) {
+                throw new Error(`EEXIST: file already exists, rename '${newNormalized}'`);
+            }
+            this.#fifoByPath.delete(oldNormalized);
+            this.#fifoByPath.set(newNormalized, fifoId);
+            const fifo = this.#fifoTable.get(fifoId)!;
+            fifo.path = newNormalized;
+            fifo.mtime = Date.now();
+            return;
+        }
+
+        const socketId = this.#socketPathToId.get(oldNormalized);
+        if (socketId !== undefined) {
+            if (this.#fifoByPath.has(newNormalized) || this.#socketPathToId.has(newNormalized) || await this.#pathExists(newNormalized)) {
+                throw new Error(`EEXIST: file already exists, rename '${newNormalized}'`);
+            }
+            this.#socketPathToId.delete(oldNormalized);
+            this.#socketPathToId.set(newNormalized, socketId);
+            const socket = this.#socketTable.get(socketId)!;
+            socket.boundPath = newNormalized;
+            socket.mtime = Date.now();
+            return;
+        }
+
         const rOld = this.#resolveMountPath(oldPath);
         const rNew = this.#resolveMountPath(newPath);
         if (!rOld) {
@@ -205,6 +500,29 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     }
 
     async ["party.openv.filesystem.write.unlink"](path: string): Promise<void> {
+        const normalized = this.#normalizePath(path);
+        const fifoId = this.#fifoByPath.get(normalized);
+        if (fifoId !== undefined) {
+            this.#fifoByPath.delete(normalized);
+            const fifo = this.#fifoTable.get(fifoId);
+            if (!fifo) return;
+            fifo.path = null;
+            fifo.mtime = Date.now();
+            this.#cleanupFifoIfUnlinkedAndClosed(fifoId);
+            return;
+        }
+
+        const socketId = this.#socketPathToId.get(normalized);
+        if (socketId !== undefined) {
+            this.#socketPathToId.delete(normalized);
+            const socket = this.#socketTable.get(socketId);
+            if (!socket) return;
+            socket.boundPath = null;
+            socket.mtime = Date.now();
+            this.#cleanupSocketIfOrphaned(socketId);
+            return;
+        }
+
         const resolved = this.#resolveMountPath(path);
         if (!resolved) {
             throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
@@ -218,6 +536,49 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     }
 
     async ["party.openv.filesystem.read.stat"](path: string): Promise<FsStats> {
+        const normalized = this.#normalizePath(path);
+        const fifoId = this.#fifoByPath.get(normalized);
+        if (fifoId !== undefined) {
+            const fifo = this.#fifoTable.get(fifoId);
+            if (!fifo) {
+                throw new Error(`ENOENT: no such file or directory, stat '${normalized}'`);
+            }
+            const pipe = this.#pipeTable.get(fifo.pipeId);
+            const size = pipe ? Math.max(0, pipe.head - pipe.tail) : 0;
+            return {
+                type: "FILE",
+                size,
+                atime: fifo.atime,
+                mtime: fifo.mtime,
+                ctime: fifo.ctime,
+                name: normalized.split("/").pop() || normalized,
+                uid: fifo.uid,
+                gid: fifo.gid,
+                mode: fifo.mode,
+                node: `party.openv.impl.corefs.fifo.${fifo.id}`,
+            };
+        }
+
+        const socketId = this.#socketPathToId.get(normalized);
+        if (socketId !== undefined) {
+            const socket = this.#socketTable.get(socketId);
+            if (!socket) {
+                throw new Error(`ENOENT: no such file or directory, stat '${normalized}'`);
+            }
+            return {
+                type: "FILE",
+                size: 0,
+                atime: socket.atime,
+                mtime: socket.mtime,
+                ctime: socket.ctime,
+                name: normalized.split("/").pop() || normalized,
+                uid: socket.uid,
+                gid: socket.gid,
+                mode: socket.mode,
+                node: `party.openv.impl.corefs.socket.${socket.id}`,
+            };
+        }
+
         const resolved = this.#resolveMountPath(path);
         if (!resolved) {
             throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
@@ -233,8 +594,25 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     async ["party.openv.filesystem.read.read"](ofd: number, length: number, position?: number): Promise<Uint8Array> {
         // Check pipe table first
         const pipeInfo = this.#ofdToPipe.get(ofd);
-        if (pipeInfo && pipeInfo.role === "read") {
-            return this.#pipeRead(pipeInfo.pipeId, length);
+        if (pipeInfo) {
+            if (pipeInfo.kind === "anon") {
+                if (pipeInfo.role !== "read") {
+                    throw new Error(`OFD ${ofd} is not readable.`);
+                }
+                return this.#pipeRead(pipeInfo.pipeId, length);
+            }
+            if (!pipeInfo.canRead) {
+                throw new Error(`OFD ${ofd} is not readable.`);
+            }
+            return this.#fifoRead(pipeInfo.fifoId, length);
+        }
+
+        const socketInfo = this.#ofdToSocket.get(ofd);
+        if (socketInfo) {
+            if (socketInfo.readPipeId === undefined) {
+                throw new Error(`ENOTCONN: socket OFD ${ofd} is not connected for read.`);
+            }
+            return this.#pipeRead(socketInfo.readPipeId, length);
         }
 
         const entry = this.#ofdTable.get(ofd);
@@ -247,6 +625,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
 
 
     async ["party.openv.filesystem.read.readdir"](path: string): Promise<string[]> {
+        const normalized = this.#normalizePath(path);
         const resolved = this.#resolveMountPath(path);
         if (!resolved) {
             throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
@@ -256,7 +635,34 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         if (!provider || !provider.readdir) {
             throw new Error(`Virtual filesystem "${id}" does not implement readdir.`);
         }
-        return provider.readdir(path);
+
+        const baseEntries = await provider.readdir(path);
+        const merged = new Set(baseEntries);
+
+        const parentOf = (fullPath: string): string => {
+            const idx = fullPath.lastIndexOf("/");
+            if (idx <= 0) return "/";
+            return fullPath.slice(0, idx);
+        };
+
+        const nameOf = (fullPath: string): string => {
+            const idx = fullPath.lastIndexOf("/");
+            return idx === -1 ? fullPath : fullPath.slice(idx + 1);
+        };
+
+        for (const fifoPath of this.#fifoByPath.keys()) {
+            if (parentOf(fifoPath) === normalized) {
+                merged.add(nameOf(fifoPath));
+            }
+        }
+
+        for (const socketPath of this.#socketPathToId.keys()) {
+            if (parentOf(socketPath) === normalized) {
+                merged.add(nameOf(socketPath));
+            }
+        }
+
+        return Array.from(merged.values());
     }
 
     async ["party.openv.filesystem.read.watch"](path: string, options?: { recursive?: boolean; }): Promise<{ events: AsyncIterable<FileSystemEvent>; abort: () => Promise<void>; }> {
@@ -284,6 +690,16 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     }> = new Map();
 
     async ["party.openv.filesystem.open"](path: string, flags: OpenFlags, mode: FileMode): Promise<number> {
+        const normalized = this.#normalizePath(path);
+        const fifoId = this.#fifoByPath.get(normalized);
+        if (fifoId !== undefined) {
+            return this.#openFifo(fifoId, flags);
+        }
+
+        if (this.#socketPathToId.has(normalized)) {
+            throw new Error(`ENXIO: socket path '${normalized}' must be used via filesystem.socket.connect.`);
+        }
+
         // Resolve path to mounted vfs provider
         const resolved = this.#resolveMountPath(path);
         if (!resolved) {
@@ -313,6 +729,26 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     }
 
     async ["party.openv.filesystem.close"](ofd: number): Promise<void> {
+        const pipeInfo = this.#ofdToPipe.get(ofd);
+        if (pipeInfo) {
+            this.#ofdToPipe.delete(ofd);
+            this.#ofdTable.delete(ofd);
+            if (pipeInfo.kind === "anon") {
+                this.#pipeCloseEnd(pipeInfo.pipeId, pipeInfo.role);
+                return;
+            }
+            this.#fifoCloseDescriptor(pipeInfo.fifoId, pipeInfo.canRead, pipeInfo.canWrite);
+            return;
+        }
+
+        const socketInfo = this.#ofdToSocket.get(ofd);
+        if (socketInfo) {
+            this.#ofdToSocket.delete(ofd);
+            this.#ofdTable.delete(ofd);
+            this.#closeSocketOfd(ofd, socketInfo);
+            return;
+        }
+
         const entry = this.#ofdTable.get(ofd);
         if (!entry) {
             throw new Error(`Invalid open file number ${ofd}`);
@@ -416,6 +852,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     }
 
     static readonly DEFAULT_PIPE_BUFFER_SIZE = 65536;
+    static readonly DEFAULT_DGRAM_QUEUE_LIMIT = 128;
 
     /**
      * Internal pipe state. A pipe is a unidirectional in-memory byte stream shared
@@ -437,35 +874,134 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
 
     #pipeIdCounter = 0;
 
+    #fifoIdCounter = 0;
+
+    #fifoByPath: Map<string, number> = new Map();
+
+    #fifoTable: Map<number, {
+        id: number;
+        path: string | null;
+        pipeId: number;
+        mode: FileMode;
+        uid: number;
+        gid: number;
+        atime: number;
+        mtime: number;
+        ctime: number;
+        openReaders: number;
+        openWriters: number;
+        pendingOpenReaders: Array<() => void>;
+        pendingOpenWriters: Array<() => void>;
+    }> = new Map();
+
+    #socketIdCounter = 0;
+
+    #socketPathToId: Map<string, number> = new Map();
+
+    #socketTable: Map<number, {
+        id: number;
+        type: FileSystemSocketType;
+        boundPath: string | null;
+        mode: FileMode;
+        uid: number;
+        gid: number;
+        atime: number;
+        mtime: number;
+        ctime: number;
+        listening: boolean;
+        backlog: number;
+        pendingAcceptedOfds: number[];
+        pendingAcceptWaiters: Array<() => void>;
+        openOfds: Set<number>;
+        pendingDatagrams: Array<{ data: Uint8Array; address: SocketAddress | null }>;
+        pendingDatagramReaders: Array<() => void>;
+        pendingDatagramWriters: Array<() => void>;
+        datagramQueueLimit: number;
+    }> = new Map();
+
+    #ofdToSocket: Map<number, { socketId: number; readPipeId?: number; writePipeId?: number }> = new Map();
+
     /**
      * Maps an OFD to its pipe id and role ("read" or "write").
      */
-    #ofdToPipe: Map<number, { pipeId: number; role: "read" | "write" }> = new Map();
+    #ofdToPipe: Map<number,
+        | { kind: "anon"; pipeId: number; role: "read" | "write" }
+        | { kind: "fifo"; fifoId: number; canRead: boolean; canWrite: boolean }
+    > = new Map();
 
     async ["party.openv.impl.filesystem.readByOfd"](ofd: number, length: number, position?: number): Promise<Uint8Array> {
         const pipeInfo = this.#ofdToPipe.get(ofd);
-        if (pipeInfo && pipeInfo.role === "read") {
-            return this.#pipeRead(pipeInfo.pipeId, length);
+        if (pipeInfo) {
+            if (pipeInfo.kind === "anon") {
+                if (pipeInfo.role !== "read") {
+                    throw new Error(`OFD ${ofd} is not readable.`);
+                }
+                return this.#pipeRead(pipeInfo.pipeId, length);
+            }
+            if (!pipeInfo.canRead) {
+                throw new Error(`OFD ${ofd} is not readable.`);
+            }
+            return this.#fifoRead(pipeInfo.fifoId, length);
         }
+
+        const socketInfo = this.#ofdToSocket.get(ofd);
+        if (socketInfo) {
+            if (socketInfo.readPipeId === undefined) {
+                throw new Error(`ENOTCONN: socket OFD ${ofd} is not connected for read.`);
+            }
+            return this.#pipeRead(socketInfo.readPipeId, length);
+        }
+
         return this["party.openv.filesystem.read.read"](ofd, length, position);
     }
 
     async ["party.openv.impl.filesystem.writeByOfd"](ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<number> {
         const pipeInfo = this.#ofdToPipe.get(ofd);
-        if (pipeInfo && pipeInfo.role === "write") {
-            return this.#pipeWrite(pipeInfo.pipeId, buffer, offset, length);
+        if (pipeInfo) {
+            if (pipeInfo.kind === "anon") {
+                if (pipeInfo.role !== "write") {
+                    throw new Error(`OFD ${ofd} is not writable.`);
+                }
+                return this.#pipeWrite(pipeInfo.pipeId, buffer, offset, length);
+            }
+            if (!pipeInfo.canWrite) {
+                throw new Error(`OFD ${ofd} is not writable.`);
+            }
+            return this.#fifoWrite(pipeInfo.fifoId, buffer, offset, length);
         }
+
+        const socketInfo = this.#ofdToSocket.get(ofd);
+        if (socketInfo) {
+            if (socketInfo.writePipeId === undefined) {
+                throw new Error(`ENOTCONN: socket OFD ${ofd} is not connected for write.`);
+            }
+            return this.#pipeWrite(socketInfo.writePipeId, buffer, offset, length);
+        }
+
         return this["party.openv.filesystem.write.write"](ofd, buffer, offset, length, position);
     }
 
     async ["party.openv.impl.filesystem.closeByOfd"](ofd: number): Promise<void> {
         const pipeInfo = this.#ofdToPipe.get(ofd);
         if (pipeInfo) {
-            this.#pipeCloseEnd(pipeInfo.pipeId, pipeInfo.role);
             this.#ofdToPipe.delete(ofd);
             this.#ofdTable.delete(ofd);
+            if (pipeInfo.kind === "anon") {
+                this.#pipeCloseEnd(pipeInfo.pipeId, pipeInfo.role);
+                return;
+            }
+            this.#fifoCloseDescriptor(pipeInfo.fifoId, pipeInfo.canRead, pipeInfo.canWrite);
             return;
         }
+
+        const socketInfo = this.#ofdToSocket.get(ofd);
+        if (socketInfo) {
+            this.#ofdToSocket.delete(ofd);
+            this.#ofdTable.delete(ofd);
+            this.#closeSocketOfd(ofd, socketInfo);
+            return;
+        }
+
         return this["party.openv.filesystem.close"](ofd);
     }
 
@@ -509,10 +1045,283 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             mode: 0,
         });
 
-        this.#ofdToPipe.set(readOfd, { pipeId, role: "read" });
-        this.#ofdToPipe.set(writeOfd, { pipeId, role: "write" });
+        this.#ofdToPipe.set(writeOfd, { kind: "anon", pipeId, role: "write" });
+        this.#ofdToPipe.set(readOfd, { kind: "anon", pipeId, role: "read" });
 
         return [readOfd, writeOfd];
+    }
+
+    async #openFifo(fifoId: number, flags: OpenFlags): Promise<number> {
+        const fifo = this.#fifoTable.get(fifoId);
+        if (!fifo) {
+            throw new Error(`ENOENT: fifo does not exist`);
+        }
+
+        const isReadOnly = flags === "r";
+        const isWriteOnly = flags === "w" || flags === "a" || flags === "wx" || flags === "ax";
+        const canRead = flags.includes("r") || flags.includes("+");
+        const canWrite = flags.includes("w") || flags.includes("a") || flags.includes("+");
+
+        if (!canRead && !canWrite) {
+            throw new Error(`EINVAL: unsupported fifo open flags '${flags}'`);
+        }
+
+        // Register this endpoint before waiting so peer opens can observe presence.
+        if (canRead) fifo.openReaders++;
+        if (canWrite) fifo.openWriters++;
+
+        if (canWrite) {
+            for (const resolve of fifo.pendingOpenReaders.splice(0)) resolve();
+        }
+        if (canRead) {
+            for (const resolve of fifo.pendingOpenWriters.splice(0)) resolve();
+        }
+
+        if (isReadOnly) {
+            while (fifo.openWriters === 0) {
+                await new Promise<void>((resolve) => fifo.pendingOpenReaders.push(resolve));
+                if (!this.#fifoTable.has(fifoId)) {
+                    if (canRead && fifo.openReaders > 0) fifo.openReaders--;
+                    if (canWrite && fifo.openWriters > 0) fifo.openWriters--;
+                    throw new Error(`ENOENT: fifo no longer exists`);
+                }
+            }
+        }
+        if (isWriteOnly) {
+            while (fifo.openReaders === 0) {
+                await new Promise<void>((resolve) => fifo.pendingOpenWriters.push(resolve));
+                if (!this.#fifoTable.has(fifoId)) {
+                    if (canRead && fifo.openReaders > 0) fifo.openReaders--;
+                    if (canWrite && fifo.openWriters > 0) fifo.openWriters--;
+                    throw new Error(`ENOENT: fifo no longer exists`);
+                }
+            }
+        }
+
+        fifo.atime = Date.now();
+        fifo.mtime = Date.now();
+
+        const ofd = ++this.#ofdCounter;
+        this.#ofdTable.set(ofd, {
+            path: fifo.path ?? `<fifo:${fifo.id}>`,
+            flags,
+            mode: fifo.mode,
+        });
+        this.#ofdToPipe.set(ofd, { kind: "fifo", fifoId, canRead, canWrite });
+        return ofd;
+    }
+
+    async #fifoRead(fifoId: number, length: number): Promise<Uint8Array> {
+        const fifo = this.#fifoTable.get(fifoId);
+        if (!fifo) throw new Error(`EPIPE: fifo does not exist.`);
+        const pipe = this.#pipeTable.get(fifo.pipeId);
+        if (!pipe) throw new Error(`EPIPE: fifo backing pipe is missing.`);
+
+        while (pipe.head === pipe.tail && fifo.openWriters > 0) {
+            await new Promise<void>(resolve => pipe.pendingReaders.push(resolve));
+            if (!this.#fifoTable.has(fifoId)) {
+                return new Uint8Array(0);
+            }
+        }
+
+        if (pipe.head === pipe.tail && fifo.openWriters === 0) {
+            return new Uint8Array(0);
+        }
+
+        const available = pipe.head - pipe.tail;
+        const toRead = Math.min(length, available);
+        const result = pipe.buffer.slice(pipe.tail, pipe.tail + toRead);
+        pipe.tail += toRead;
+        fifo.atime = Date.now();
+
+        if (pipe.tail === pipe.head) {
+            pipe.tail = 0;
+            pipe.head = 0;
+        }
+
+        for (const resolve of pipe.pendingWriters.splice(0)) resolve();
+
+        return result;
+    }
+
+    async #fifoWrite(fifoId: number, buffer: Uint8Array, offset?: number, length?: number): Promise<number> {
+        const fifo = this.#fifoTable.get(fifoId);
+        if (!fifo) throw new Error(`EPIPE: fifo does not exist.`);
+        const pipe = this.#pipeTable.get(fifo.pipeId);
+        if (!pipe) throw new Error(`EPIPE: fifo backing pipe is missing.`);
+
+        if (fifo.openReaders === 0) throw new Error(`Broken pipe: read end is closed.`);
+
+        const srcOffset = offset ?? 0;
+        const toWrite = length ?? (buffer.length - srcOffset);
+        const src = buffer.subarray(srcOffset, srcOffset + toWrite);
+
+        let written = 0;
+        while (written < src.length) {
+            if (fifo.openReaders === 0) throw new Error(`Broken pipe: read end is closed.`);
+
+            const space = pipe.buffer.length - pipe.head;
+            if (space === 0) {
+                if (pipe.tail > 0) {
+                    const remaining = pipe.head - pipe.tail;
+                    pipe.buffer.copyWithin(0, pipe.tail, pipe.head);
+                    pipe.tail = 0;
+                    pipe.head = remaining;
+                    continue;
+                }
+                await new Promise<void>(resolve => pipe.pendingWriters.push(resolve));
+                if (!this.#fifoTable.has(fifoId)) {
+                    throw new Error(`Broken pipe: fifo endpoint is closed.`);
+                }
+                continue;
+            }
+
+            const chunk = Math.min(src.length - written, space);
+            pipe.buffer.set(src.subarray(written, written + chunk), pipe.head);
+            pipe.head += chunk;
+            written += chunk;
+            fifo.mtime = Date.now();
+
+            for (const resolve of pipe.pendingReaders.splice(0)) {
+                resolve();
+            }
+        }
+
+        return written;
+    }
+
+    #fifoCloseDescriptor(fifoId: number, canRead: boolean, canWrite: boolean): void {
+        const fifo = this.#fifoTable.get(fifoId);
+        if (!fifo) return;
+        const pipe = this.#pipeTable.get(fifo.pipeId);
+
+        if (canRead && fifo.openReaders > 0) {
+            fifo.openReaders--;
+        }
+        if (canWrite && fifo.openWriters > 0) {
+            fifo.openWriters--;
+        }
+
+        if (pipe) {
+            if (fifo.openReaders === 0) {
+                for (const resolve of pipe.pendingWriters.splice(0)) resolve();
+            }
+            if (fifo.openWriters === 0) {
+                for (const resolve of pipe.pendingReaders.splice(0)) resolve();
+            }
+        }
+
+        this.#cleanupFifoIfUnlinkedAndClosed(fifoId);
+    }
+
+    #cleanupFifoIfUnlinkedAndClosed(fifoId: number): void {
+        const fifo = this.#fifoTable.get(fifoId);
+        if (!fifo) return;
+        if (fifo.path !== null) return;
+        if (fifo.openReaders !== 0 || fifo.openWriters !== 0) return;
+
+        const pipe = this.#pipeTable.get(fifo.pipeId);
+        if (pipe) {
+            for (const resolve of pipe.pendingReaders.splice(0)) resolve();
+            for (const resolve of pipe.pendingWriters.splice(0)) resolve();
+            this.#pipeTable.delete(fifo.pipeId);
+        }
+
+        this.#fifoTable.delete(fifoId);
+    }
+
+    #requireSocket(socketId: number): {
+        id: number;
+        type: FileSystemSocketType;
+        boundPath: string | null;
+        mode: FileMode;
+        uid: number;
+        gid: number;
+        atime: number;
+        mtime: number;
+        ctime: number;
+        listening: boolean;
+        backlog: number;
+        pendingAcceptedOfds: number[];
+        pendingAcceptWaiters: Array<() => void>;
+        openOfds: Set<number>;
+        pendingDatagrams: Array<{ data: Uint8Array; address: SocketAddress | null }>;
+        pendingDatagramReaders: Array<() => void>;
+        pendingDatagramWriters: Array<() => void>;
+        datagramQueueLimit: number;
+    } {
+        const socket = this.#socketTable.get(socketId);
+        if (!socket) {
+            throw new Error(`EBADF: socket ${socketId} does not exist.`);
+        }
+        return socket;
+    }
+
+    #requireSocketOfd(ofd: number): { socketId: number; readPipeId?: number; writePipeId?: number } {
+        const info = this.#ofdToSocket.get(ofd);
+        if (!info) {
+            throw new Error(`ENOTSOCK: OFD ${ofd} is not a socket.`);
+        }
+        return info;
+    }
+
+    #createPipeState(bufferSize: number = CoreFS.DEFAULT_PIPE_BUFFER_SIZE): number {
+        const pipeId = ++this.#pipeIdCounter;
+        this.#pipeTable.set(pipeId, {
+            buffer: new Uint8Array(bufferSize),
+            head: 0,
+            tail: 0,
+            readClosed: false,
+            writeClosed: false,
+            pendingReaders: [],
+            pendingWriters: [],
+        });
+        return pipeId;
+    }
+
+    #closeSocketOfd(ofd: number, socketInfo: { socketId: number; readPipeId?: number; writePipeId?: number }): void {
+        if (socketInfo.readPipeId !== undefined) {
+            this.#pipeCloseEnd(socketInfo.readPipeId, "read");
+        }
+        if (socketInfo.writePipeId !== undefined) {
+            this.#pipeCloseEnd(socketInfo.writePipeId, "write");
+        }
+
+        const socket = this.#socketTable.get(socketInfo.socketId);
+        if (!socket) return;
+        socket.openOfds.delete(ofd);
+        socket.pendingAcceptedOfds = socket.pendingAcceptedOfds.filter((queuedOfd) => queuedOfd !== ofd);
+        for (const resolve of socket.pendingAcceptWaiters.splice(0)) resolve();
+        for (const resolve of socket.pendingDatagramReaders.splice(0)) resolve();
+        for (const resolve of socket.pendingDatagramWriters.splice(0)) resolve();
+        this.#cleanupSocketIfOrphaned(socket.id);
+    }
+
+    #cleanupSocketIfOrphaned(socketId: number): void {
+        const socket = this.#socketTable.get(socketId);
+        if (!socket) return;
+        if (socket.boundPath !== null) return;
+        if (socket.openOfds.size !== 0) return;
+        if (socket.pendingAcceptedOfds.length !== 0) return;
+        this.#socketTable.delete(socketId);
+    }
+
+    async #pathExists(path: string): Promise<boolean> {
+        try {
+            await this["party.openv.filesystem.read.stat"](path);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    #normalizePath(path: string): string {
+        if (!path) return "/";
+        let normalized = path.startsWith("/") ? path : "/" + path;
+        if (normalized.length > 1) {
+            normalized = normalized.replace(/\/+$/, "");
+        }
+        return normalized;
     }
 
     async #pipeRead(pipeId: number, length: number): Promise<Uint8Array> {
@@ -607,6 +1416,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     supports(ns: typeof FS_VIRTUAL_NAMESPACE | typeof FS_VIRTUAL_NAMESPACE_VERSIONED): Promise<typeof FS_VIRTUAL_NAMESPACE_VERSIONED>;
     supports(ns: typeof FS_READ_NAMESPACE | typeof FS_READ_NAMESPACE_VERSIONED): Promise<typeof FS_READ_NAMESPACE_VERSIONED>;
     supports(ns: typeof FS_WRITE_NAMESPACE | typeof FS_WRITE_NAMESPACE_VERSIONED): Promise<typeof FS_WRITE_NAMESPACE_VERSIONED>;
+    supports(ns: typeof FS_SOCKET_NAMESPACE | typeof FS_SOCKET_NAMESPACE_VERSIONED): Promise<typeof FS_SOCKET_NAMESPACE_VERSIONED>;
     supports(ns: typeof FS_SYNC_NAMESPACE | typeof FS_SYNC_NAMESPACE_VERSIONED): Promise<typeof FS_SYNC_NAMESPACE_VERSIONED>;
     supports(ns: typeof FS_NAMESPACE | typeof FS_NAMESPACE_VERSIONED): Promise<typeof FS_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
@@ -639,6 +1449,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             ns === FS_WRITE_NAMESPACE_VERSIONED
         ) {
             return FS_WRITE_NAMESPACE_VERSIONED;
+        }
+        if (
+            ns === FS_SOCKET_NAMESPACE ||
+            ns === FS_SOCKET_NAMESPACE_VERSIONED
+        ) {
+            return FS_SOCKET_NAMESPACE_VERSIONED;
         }
         if (
             ns === FS_NAMESPACE ||
@@ -702,6 +1518,8 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
 }
 
 const S_IRUSR = 0o400;
+const S_IFIFO = 0o010000;
+const S_IFSOCK = 0o140000;
 const S_IWUSR = 0o200;
 const S_IXUSR = 0o100;
 const S_IRGRP = 0o040;
@@ -743,12 +1561,14 @@ export class ProcessScopedFS implements
     FileSystemReadOnlyComponent,
     FileSystemReadWriteComponent,
     FileSystemPipeComponent,
+    FileSystemSocketComponent,
     FileSystemSyncComponent,
     FileSystemLocalComponent {
     #system: FileSystemCoreComponent &
         FileSystemReadOnlyComponent &
         FileSystemReadWriteComponent &
         FileSystemPipeComponent &
+        FileSystemSocketComponent &
         FileSystemSyncComponent &
         CoreFSExt &
         ProcessComponent &
@@ -763,6 +1583,7 @@ export class ProcessScopedFS implements
         FileSystemReadOnlyComponent &
         FileSystemReadWriteComponent &
         FileSystemPipeComponent &
+        FileSystemSocketComponent &
         FileSystemSyncComponent &
         CoreFSExt &
         ProcessComponent &
@@ -900,6 +1721,17 @@ export class ProcessScopedFS implements
         return this.#system["party.openv.filesystem.write.create"](path, this.#applyUmask(mode));
     }
 
+    async ["party.openv.filesystem.write.mkfifo"](path: string, mode: FileMode = 0o666): Promise<void> {
+        await this.#checkPathTraversal(path);
+        const parent = path.split("/").slice(0, -1).join("/") || "/";
+        const parentStat = await this.#system["party.openv.filesystem.read.stat"](parent);
+        const uid = await this.#getUid();
+        const gid = await this.#getGid();
+        requireAccess(parentStat, uid, gid, "write", parent);
+        requireAccess(parentStat, uid, gid, "execute", parent);
+        return this.#system["party.openv.filesystem.write.mkfifo"](path, this.#applyUmask(mode));
+    }
+
     async ["party.openv.filesystem.write.mkdir"](path: string, mode: FileMode = 0o777): Promise<void> {
         await this.#checkPathTraversal(path);
         const parent = path.split("/").slice(0, -1).join("/") || "/";
@@ -1000,12 +1832,53 @@ export class ProcessScopedFS implements
         return [readFd, writeFd];
     }
 
+    async ["party.openv.filesystem.socket.create"](type: FileSystemSocketType): Promise<number> {
+        const ofd = await this.#system["party.openv.filesystem.socket.create"](type);
+        const fd = ++this.#fdCounter;
+        this.#fdToOfd.set(fd, ofd);
+        return fd;
+    }
+
+    async ["party.openv.filesystem.socket.bind"](fd: number, address: SocketAddress): Promise<void> {
+        const ofd = this.#resolveOfd(fd);
+        await this.#system["party.openv.filesystem.socket.bind"](ofd, address);
+    }
+
+    async ["party.openv.filesystem.socket.listen"](fd: number, backlog?: number): Promise<void> {
+        const ofd = this.#resolveOfd(fd);
+        await this.#system["party.openv.filesystem.socket.listen"](ofd, backlog);
+    }
+
+    async ["party.openv.filesystem.socket.connect"](fd: number, address: SocketAddress): Promise<void> {
+        const ofd = this.#resolveOfd(fd);
+        await this.#system["party.openv.filesystem.socket.connect"](ofd, address);
+    }
+
+    async ["party.openv.filesystem.socket.accept"](fd: number): Promise<number> {
+        const ofd = this.#resolveOfd(fd);
+        const acceptedOfd = await this.#system["party.openv.filesystem.socket.accept"](ofd);
+        const acceptedFd = ++this.#fdCounter;
+        this.#fdToOfd.set(acceptedFd, acceptedOfd);
+        return acceptedFd;
+    }
+
+    async ["party.openv.filesystem.socket.sendto"](fd: number, data: Uint8Array, address: SocketAddress): Promise<number> {
+        const ofd = this.#resolveOfd(fd);
+        return this.#system["party.openv.filesystem.socket.sendto"](ofd, data, address);
+    }
+
+    async ["party.openv.filesystem.socket.recvfrom"](fd: number, maxLength: number): Promise<{ data: Uint8Array; address: SocketAddress | null }> {
+        const ofd = this.#resolveOfd(fd);
+        return this.#system["party.openv.filesystem.socket.recvfrom"](ofd, maxLength);
+    }
+
     async supports(ns: typeof FS_NAMESPACE | typeof FS_NAMESPACE_VERSIONED): Promise<typeof FS_NAMESPACE_VERSIONED>;
     async supports(ns: typeof FS_READ_NAMESPACE | typeof FS_READ_NAMESPACE_VERSIONED): Promise<typeof FS_READ_NAMESPACE_VERSIONED>;
     async supports(ns: typeof FS_WRITE_NAMESPACE | typeof FS_WRITE_NAMESPACE_VERSIONED): Promise<typeof FS_WRITE_NAMESPACE_VERSIONED>;
     async supports(ns: typeof FS_LOCAL_NAMESPACE | typeof FS_LOCAL_NAMESPACE_VERSIONED): Promise<typeof FS_LOCAL_NAMESPACE_VERSIONED>;
     async supports(ns: typeof FS_SYNC_NAMESPACE | typeof FS_SYNC_NAMESPACE_VERSIONED): Promise<typeof FS_SYNC_NAMESPACE_VERSIONED>;
     async supports(ns: typeof FS_PIPE_NAMESPACE | typeof FS_PIPE_NAMESPACE_VERSIONED): Promise<typeof FS_PIPE_NAMESPACE_VERSIONED>;
+    async supports(ns: typeof FS_SOCKET_NAMESPACE | typeof FS_SOCKET_NAMESPACE_VERSIONED): Promise<typeof FS_SOCKET_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
         switch (ns) {
             case FS_NAMESPACE:
@@ -1018,6 +1891,8 @@ export class ProcessScopedFS implements
             case FS_LOCAL_NAMESPACE_VERSIONED: return FS_LOCAL_NAMESPACE_VERSIONED;
             case FS_PIPE_NAMESPACE:
             case FS_PIPE_NAMESPACE_VERSIONED: return FS_PIPE_NAMESPACE_VERSIONED;
+            case FS_SOCKET_NAMESPACE:
+            case FS_SOCKET_NAMESPACE_VERSIONED: return FS_SOCKET_NAMESPACE_VERSIONED;
         }
         return null;
     }

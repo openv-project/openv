@@ -59,6 +59,14 @@ export const FS_LOCAL_NAMESPACE = `${FS_NAMESPACE}.local` as const;
 export const FS_LOCAL_NAMESPACE_VERSIONED = `${FS_LOCAL_NAMESPACE}/0.1.0` as const;
 export const FS_PIPE_NAMESPACE = `${FS_NAMESPACE}.pipe` as const;
 export const FS_PIPE_NAMESPACE_VERSIONED = `${FS_PIPE_NAMESPACE}/0.1.0` as const;
+export const FS_SOCKET_NAMESPACE = `${FS_NAMESPACE}.socket` as const;
+export const FS_SOCKET_NAMESPACE_VERSIONED = `${FS_SOCKET_NAMESPACE}/0.1.0` as const;
+
+export type FileSystemSocketType = "stream" | "dgram";
+
+export interface SocketAddress {
+    path: string;
+}
 
 /**
  * The core file system component that provides the open/close interface.
@@ -114,6 +122,7 @@ export interface FileSystemReadWriteComponent extends SystemComponent<typeof FS_
      */
     ["party.openv.filesystem.write.write"](fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<number>;
     ["party.openv.filesystem.write.create"](path: string, mode?: FileMode): Promise<void>;
+    ["party.openv.filesystem.write.mkfifo"](path: string, mode?: FileMode): Promise<void>;
     ["party.openv.filesystem.write.mkdir"](path: string, mode?: FileMode): Promise<void>;
     ["party.openv.filesystem.write.rmdir"](path: string): Promise<void>;
     ["party.openv.filesystem.write.rename"](oldPath: string, newPath: string): Promise<void>;
@@ -165,6 +174,20 @@ export interface FileSystemPipeComponent extends SystemComponent<typeof FS_PIPE_
      * The returned file numbers/fds are ordered as [readEnd, writeEnd], where readEnd is readable and writeEnd is writable.
      */
     ["party.openv.filesystem.pipe.create"](bufferSize?: number): Promise<[readEnd: number, writeEnd: number]>;
+}
+
+/**
+ * Socket capabilities that are not expressible through plain open/read/write alone.
+ * Data transfer for connected stream sockets still uses filesystem read/write.
+ */
+export interface FileSystemSocketComponent extends SystemComponent<typeof FS_SOCKET_NAMESPACE_VERSIONED, typeof FS_SOCKET_NAMESPACE> {
+    ["party.openv.filesystem.socket.create"](type: FileSystemSocketType): Promise<number>;
+    ["party.openv.filesystem.socket.bind"](fd: number, address: SocketAddress): Promise<void>;
+    ["party.openv.filesystem.socket.listen"](fd: number, backlog?: number): Promise<void>;
+    ["party.openv.filesystem.socket.connect"](fd: number, address: SocketAddress): Promise<void>;
+    ["party.openv.filesystem.socket.accept"](fd: number): Promise<number>;
+    ["party.openv.filesystem.socket.sendto"](fd: number, data: Uint8Array, address: SocketAddress): Promise<number>;
+    ["party.openv.filesystem.socket.recvfrom"](fd: number, maxLength: number): Promise<{ data: Uint8Array; address: SocketAddress | null }>;
 }
 
 export interface FileSystemVirtualComponent extends SystemComponent<typeof FS_VIRTUAL_NAMESPACE_VERSIONED, typeof FS_VIRTUAL_NAMESPACE> {
