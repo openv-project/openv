@@ -74,15 +74,6 @@ const SOCKET_PATH = "/dom.sock";
 async function startDOM() {
     try {
         try {
-            const stat = await openv.system["party.openv.filesystem.read.stat"]("/var/lib/shopify/remote-dom");
-            if (stat.type !== "DIRECTORY") {
-                throw new Error("path exists but is not a directory");
-            }
-        } catch {
-            await openv.system["party.openv.filesystem.write.mkdir"]("/var/lib/shopify/remote-dom", 0o755);
-        }
-
-        try {
             await openv.system["party.openv.filesystem.write.unlink"](SOCKET_PATH);
         } catch { }
 
@@ -106,6 +97,8 @@ async function startDOM() {
                         try {
                             while (true) {
                                 const chunk = await openv.system["party.openv.filesystem.read.read"](connFd, 4096);
+                                console.log(`[DOM] Received chunk of ${chunk.byteLength} bytes`);
+                                console.debug(`[DOM] Chunk content:`, decoder.decode(chunk));
                                 if (chunk.byteLength === 0) {
                                     console.log(`[DOM] Connection closed`);
                                     break;
@@ -164,9 +157,10 @@ const writeStdout = async (msg) => {
 
 const now = () => new Date().toISOString();
 
-import { window } from '/@/lib/remote-dom/core/polyfill/polyfill.js';
+import { Window, window } from '/@/lib/remote-dom/core/polyfill/polyfill.js';
 import { RemoteRootElement } from '/@/lib/remote-dom/core/elements.js';
-import { createRemoteConnection } from '/@/lib/remote-dom/core/connection.js';
+
+Window.setGlobal(window);
 
 async function main() {
     const fd = await openv.system["party.openv.filesystem.socket.create"]("stream");
@@ -189,21 +183,20 @@ async function main() {
         if (!connected) {
             throw new Error("Could not connect to DOM socket");
         }
-
-        // Create a connection that sends mutations over the socket
-        const connection = createRemoteConnection({
-            send(message) {
-                const json = JSON.stringify(message);
-                openv.system["party.openv.filesystem.write.write"](fd, enc.encode(json + "\\n")).catch(e => {
-                    console.error("Failed to send mutation:", e);
+ 
+        // Sender-side RemoteConnection
+        const connection = {
+            async call() {
+                throw new Error("Remote call() not implemented in socket bridge");
+            },
+            mutate(records) {
+                const json = JSON.stringify(records); // records is an array of mutation records
+                openv.system["party.openv.filesystem.write.write"](fd, enc.encode(json + "\\n")).catch((e) => {
+                    console.error("Failed to send mutations:", e);
                 });
             },
-        });
+        };
 
-        // Create a remote root element
-        // const root = new RemoteRootElement(connection);
-        // import {RemoteRootElement} from '@remote-dom/core/elements';
- 
         customElements.define('remote-root', RemoteRootElement);
         const root = document.createElement('remote-root');
         root.connect(connection);
