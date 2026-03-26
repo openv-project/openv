@@ -146,8 +146,8 @@ await startDOM();
 
 const FILE_PATH = "/test.js";
 const DEFAULT_CONTENT =
-    `import { connect } from "/@/lib/openv/openv-core/mod.js";
-const openv = await connect();
+    `import { configure } from "/@/etc/distro.js";
+const openv = await configure();
 
 const enc = new TextEncoder();
 

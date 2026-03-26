@@ -1,4 +1,4 @@
 node_modules
 dist
 dist-types
-.stage0-staging
+stage0/.staging
