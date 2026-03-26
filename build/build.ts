@@ -16,12 +16,14 @@ const STAGE0_PACKAGES: Array<{
     stage0Path: string;
     distName: string;
 }> = [
-        { src: "packages/openv-api", stage0Path: "/lib/openv/openv-api", distName: "openv-api" },
-        { src: "packages/openv-core", stage0Path: "/lib/openv/openv-core", distName: "openv-core" },
-        { src: "packages/party.openv.api.fs", stage0Path: "/lib/openv/api/fs", distName: "party.openv.api.fs" },
-        { src: "packages/party.openv.api.registry", stage0Path: "/lib/openv/api/registry", distName: "party.openv.api.registry" },
-        { src: "packages/openv-webos", stage0Path: "/srv/openv-webos", distName: "openv-webos" },
-    ];
+    { src: "packages/openv-api", stage0Path: "/lib/openv/openv-api", distName: "openv-api" },
+    { src: "packages/openv-core", stage0Path: "/lib/openv/openv-core", distName: "openv-core" },
+    { src: "packages/party.openv.api.fs", stage0Path: "/lib/openv/api/fs", distName: "party.openv.api.fs" },
+    { src: "packages/party.openv.api.registry", stage0Path: "/lib/openv/api/registry", distName: "party.openv.api.registry" },
+    { src: "packages/openv-webos", stage0Path: "/srv/openv-webos", distName: "openv-webos" },
+    { src: "node_modules/@remote-dom/core/source", stage0Path: "/lib/remote-dom/core", distName: "remote-dom-core" },
+    { src: "node_modules/@remote-dom/polyfill/source", stage0Path: "/lib/remote-dom/polyfill", distName: "remote-dom-polyfill" },
+];
 
 const WEBSERVER = join(ROOT, "packages/openv-webserver");
 
@@ -60,8 +62,13 @@ for (const pkg of STAGE0_PACKAGES) {
     const srcDir = join(ROOT, pkg.src);
     const stageDir = join(STAGE0_STAGING, pkg.stage0Path);
 
-    const tsFiles = (await collectFiles(srcDir, [".ts"]))
+    let tsFiles = (await collectFiles(srcDir, [".ts"]))
         .filter(f => !f.endsWith(".d.ts"));
+
+    // For remote-dom packages, only include non-test files
+    if (pkg.distName.startsWith("remote-dom-")) {
+        tsFiles = tsFiles.filter(f => !f.includes("/tests/") && !f.endsWith(".test.ts"));
+    }
 
     if (tsFiles.length === 0) continue;
 
@@ -70,7 +77,7 @@ for (const pkg of STAGE0_PACKAGES) {
         outdir: stageDir,
         outbase: srcDir,
         format: "esm",
-        bundle: true,
+        bundle: true, 
         packages: "external",
         platform: "browser",
         minify: true,

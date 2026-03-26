@@ -1,5 +1,11 @@
 import { FileSystemCoreComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemSocketComponent, ProcessComponent } from "@openv-project/openv-api";
 import { ClientOpEnv, CoreFSExt, CoreProcessExt, createPostMessageTransport, ProcessScopedFS, ProcessScopedProcess, ProcessScopedRegistry, registerWebExecutor } from "@openv-project/openv-core";
+import { DOMRemoteReceiver } from '@remote-dom/core/receivers';
+
+const r = document.querySelector('#root');
+
+const receiver = new DOMRemoteReceiver();
+receiver.connect(r!);
 
 const CHANNEL = "openv-sw-channel";
 
@@ -63,260 +69,202 @@ await registerWebExecutor(openv.system, async (ctx) => {
     return result;
 });
 
+const SOCKET_PATH = "/dom.sock";
+
+async function startDOM() {
+    try {
+        try {
+            const stat = await openv.system["party.openv.filesystem.read.stat"]("/var/lib/shopify/remote-dom");
+            if (stat.type !== "DIRECTORY") {
+                throw new Error("path exists but is not a directory");
+            }
+        } catch {
+            await openv.system["party.openv.filesystem.write.mkdir"]("/var/lib/shopify/remote-dom", 0o755);
+        }
+
+        try {
+            await openv.system["party.openv.filesystem.write.unlink"](SOCKET_PATH);
+        } catch { }
+
+        const listenFd = await openv.system["party.openv.filesystem.socket.create"]("stream");
+        await openv.system["party.openv.filesystem.socket.bind"](listenFd, { path: SOCKET_PATH });
+        await openv.system["party.openv.filesystem.socket.listen"](listenFd, 8);
+
+        console.log(`[DOM] Listening on ${SOCKET_PATH}`);
+
+        (async () => {
+            while (true) {
+                try {
+                    const connFd = await openv.system["party.openv.filesystem.socket.accept"](listenFd);
+                    console.log(`[DOM] Accepted connection`);
+
+                    // Handle this connection
+                    (async () => {
+                        let carry = "";
+                        const decoder = new TextDecoder();
+
+                        try {
+                            while (true) {
+                                const chunk = await openv.system["party.openv.filesystem.read.read"](connFd, 4096);
+                                if (chunk.byteLength === 0) {
+                                    console.log(`[DOM] Connection closed`);
+                                    break;
+                                }
+
+                                carry += decoder.decode(chunk, { stream: true });
+
+                                // Process complete JSON lines
+                                let idx;
+                                while ((idx = carry.indexOf("\n")) !== -1) {
+                                    const line = carry.substring(0, idx).trim();
+                                    carry = carry.substring(idx + 1);
+
+                                    if (!line) continue;
+
+                                    try {
+                                        const mutation = JSON.parse(line);
+                                        receiver.connection.mutate(mutation);
+                                    } catch (err) {
+                                        console.error(`[DOM] Failed to parse/apply mutation:`, err, line);
+                                    }
+                                }
+                            }
+                        } catch (err) {
+                            console.error(`[DOM] Connection error:`, err);
+                        } finally {
+                            try {
+                                await openv.system["party.openv.filesystem.close"](connFd);
+                            } catch { }
+                        }
+                    })();
+                } catch (err) {
+                    console.error(`[DOM] Accept error:`, err);
+                    break;
+                }
+            }
+        })();
+
+    } catch (err) {
+        console.error(`[DOM] Failed to start:`, err);
+    }
+}
+
+await startDOM();
+
 const FILE_PATH = "/test.js";
-const FIFO_DIR = "/demo-ipc";
-const FIFO_A = `${FIFO_DIR}/proc-a.fifo`;
-const FIFO_B = `${FIFO_DIR}/proc-b.fifo`;
-const STREAM_SOCKET_PATH = `${FIFO_DIR}/phase2.stream.sock`;
-const DGRAM_SERVER_PATH = `${FIFO_DIR}/phase3.dgram.server.sock`;
-const DGRAM_CLIENT_PATH = `${FIFO_DIR}/phase3.dgram.client.sock`;
 const DEFAULT_CONTENT =
     `import { connect } from "/@/lib/openv/openv-core/mod.js";
 const openv = await connect();
 
 const enc = new TextEncoder();
-const dec = new TextDecoder();
 
 const writeStdout = async (msg) => {
     await openv.system["party.openv.filesystem.write.write"](1, enc.encode(msg));
 };
 
 const now = () => new Date().toISOString();
-const pid = await openv.system["party.openv.process.local.getpid"]();
-const args = await openv.system["party.openv.process.local.getargs"]();
 
-function getArg(flag, fallback) {
-    const idx = args.indexOf(flag);
-    if (idx >= 0 && idx + 1 < args.length) return args[idx + 1];
-    return fallback;
-}
+import { window } from '/@/lib/remote-dom/core/polyfill/polyfill.js';
+import { RemoteRootElement } from '/@/lib/remote-dom/core/elements.js';
+import { createRemoteConnection } from '/@/lib/remote-dom/core/connection.js';
 
-const fifoPath = getArg("--fifo", "/demo-ipc/default.fifo");
-const socketPath = getArg("--socket", "/demo-ipc/default.stream.sock");
-const mode = getArg("--mode", "fifo");
-const workerName = getArg("--name", "worker");
-
-async function runFifoMode() {
-    await writeStdout("[" + now() + "] [" + workerName + "] pid=" + pid + " starting fifo=" + fifoPath + "\\n");
-
-    let controlFd;
-    let carry = "";
-
+async function main() {
+    const fd = await openv.system["party.openv.filesystem.socket.create"]("stream");
+    
     try {
-        controlFd = await openv.system["party.openv.filesystem.open"](fifoPath, "r", 0o666);
-        await writeStdout("[" + now() + "] [" + workerName + "] control fifo opened for read\\n");
-
-        while (true) {
-            const chunk = await openv.system["party.openv.filesystem.read.read"](controlFd, 4096);
-            if (chunk.byteLength === 0) {
-                throw new Error("control fifo closed by peer (EOF)");
-            }
-
-            carry += dec.decode(chunk, { stream: true });
-            const lines = carry.split("\\n");
-            carry = lines.pop() ?? "";
-
-            for (const raw of lines) {
-                const line = raw.trim();
-                if (!line) continue;
-
-                if (line === "quit") {
-                    await writeStdout("[" + now() + "] [" + workerName + "] quit received, exiting cleanly\\n");
-                    await openv.system["party.openv.process.local.exit"](0);
-                }
-
-                await writeStdout("[" + now() + "] [" + workerName + "] message=" + line + "\\n");
-            }
-        }
-    } catch (err) {
-        await writeStdout("[" + now() + "] [" + workerName + "] ERROR " + String(err) + "\\n");
-        await openv.system["party.openv.process.local.exit"](1);
-    } finally {
-        if (controlFd !== undefined) {
-            try {
-                await openv.system["party.openv.filesystem.close"](controlFd);
-            } catch {}
-        }
-    }
-}
-
-async function runStreamServer() {
-    let listenFd;
-    let connFd;
-    let carry = "";
-    try {
-        listenFd = await openv.system["party.openv.filesystem.socket.create"]("stream");
-        await openv.system["party.openv.filesystem.socket.bind"](listenFd, { path: socketPath });
-        await openv.system["party.openv.filesystem.socket.listen"](listenFd, 8);
-        await writeStdout("[" + now() + "] [" + workerName + "] listening socket=" + socketPath + "\\n");
-
-        connFd = await openv.system["party.openv.filesystem.socket.accept"](listenFd);
-        await writeStdout("[" + now() + "] [" + workerName + "] accepted stream client\\n");
-
-        while (true) {
-            const chunk = await openv.system["party.openv.filesystem.read.read"](connFd, 4096);
-            if (chunk.byteLength === 0) {
-                await writeStdout("[" + now() + "] [" + workerName + "] stream peer closed\\n");
-                await openv.system["party.openv.process.local.exit"](0);
-            }
-
-            carry += dec.decode(chunk, { stream: true });
-            const lines = carry.split("\\n");
-            carry = lines.pop() ?? "";
-
-            for (const raw of lines) {
-                const line = raw.trim();
-                if (!line) continue;
-                await writeStdout("[" + now() + "] [" + workerName + "] stream message=" + line + "\\n");
-                if (line === "quit") {
-                    await writeStdout("[" + now() + "] [" + workerName + "] quit received over stream\\n");
-                    await openv.system["party.openv.process.local.exit"](0);
-                }
-            }
-        }
-    } catch (err) {
-        await writeStdout("[" + now() + "] [" + workerName + "] ERROR " + String(err) + "\\n");
-        await openv.system["party.openv.process.local.exit"](1);
-    } finally {
-        try { if (connFd !== undefined) await openv.system["party.openv.filesystem.close"](connFd); } catch {}
-        try { if (listenFd !== undefined) await openv.system["party.openv.filesystem.close"](listenFd); } catch {}
-    }
-}
-
-async function runStreamClient() {
-    let fd;
-    try {
-        fd = await openv.system["party.openv.filesystem.socket.create"]("stream");
-        await writeStdout("[" + now() + "] [" + workerName + "] connecting socket=" + socketPath + "\\n");
         let connected = false;
-        let lastErr = null;
         for (let attempt = 1; attempt <= 40; attempt++) {
             try {
-                await openv.system["party.openv.filesystem.socket.connect"](fd, { path: socketPath });
+                await openv.system["party.openv.filesystem.socket.connect"](fd, { path: "/dom.sock" });
                 connected = true;
-                if (attempt > 1) {
-                    await writeStdout("[" + now() + "] [" + workerName + "] connect succeeded after attempt=" + attempt + "\\n");
-                }
+                await writeStdout("[" + now() + "] Connected to dom\\n");
                 break;
             } catch (err) {
-                lastErr = err;
-                const msg = String(err);
-                if (!msg.includes("ECONNREFUSED")) {
-                    throw err;
+                if (attempt < 40) {
+                    await new Promise((resolve) => setTimeout(resolve, 50));
                 }
-                await writeStdout("[" + now() + "] [" + workerName + "] waiting for server attempt=" + attempt + "\\n");
-                await new Promise((resolve) => setTimeout(resolve, 50));
             }
         }
+
         if (!connected) {
-            throw new Error("connect timeout: " + String(lastErr));
+            throw new Error("Could not connect to DOM socket");
         }
-        await writeStdout("[" + now() + "] [" + workerName + "] connected\\n");
 
-        const payload = [
-            "hello-from-client",
-            "phase2-stream-check",
-            "quit",
-        ].join("\\n") + "\\n";
-        await openv.system["party.openv.filesystem.write.write"](fd, enc.encode(payload));
-        await writeStdout("[" + now() + "] [" + workerName + "] sent payload and exiting\\n");
+        // Create a connection that sends mutations over the socket
+        const connection = createRemoteConnection({
+            send(message) {
+                const json = JSON.stringify(message);
+                openv.system["party.openv.filesystem.write.write"](fd, enc.encode(json + "\\n")).catch(e => {
+                    console.error("Failed to send mutation:", e);
+                });
+            },
+        });
+
+        // Create a remote root element
+        // const root = new RemoteRootElement(connection);
+        // import {RemoteRootElement} from '@remote-dom/core/elements';
+ 
+        customElements.define('remote-root', RemoteRootElement);
+        const root = document.createElement('remote-root');
+        root.connect(connection);
+        root.append("Hello, Remote DOM!");
+
+        // Now use normal DOM APIs to create elements
+        const div = document.createElement('div');
+        div.setAttribute('style', 'padding: 1rem; margin: 1rem 0; border: 1px solid #ccc; background-color: #f9f9f9;');
+        
+        const title = document.createElement('h3');
+        title.textContent = 'Hello from Remote DOM!';
+        div.appendChild(title);
+
+        const description = document.createElement('p');
+        description.textContent = 'This content was created by a process using the remote-dom polyfill and sent over a Unix socket.';
+        description.setAttribute('style', 'font-size: 0.9rem; color: #666;');
+        div.appendChild(description);
+
+        const button = document.createElement('button');
+        button.textContent = 'Click Me!';
+        button.setAttribute('style', 'padding: 0.5rem 1rem; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;');
+        button.onclick = () => {
+            description.textContent = 'You clicked the button!';
+        };
+        div.appendChild(button);
+
+        // Append the div to the root
+        root.appendChild(div);
+
+        await writeStdout("[" + now() + "] Created elements via remote-dom\\n");
+
+        // Give socket time to send all mutations
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        await writeStdout("[" + now() + "] Done\\n");
         await openv.system["party.openv.process.local.exit"](0);
     } catch (err) {
-        await writeStdout("[" + now() + "] [" + workerName + "] ERROR " + String(err) + "\\n");
+        await writeStdout("[" + now() + "] Error: " + String(err) + "\\n");
+        console.error("Demo error:", err);
         await openv.system["party.openv.process.local.exit"](1);
     } finally {
-        try { if (fd !== undefined) await openv.system["party.openv.filesystem.close"](fd); } catch {}
+        try {
+            await openv.system["party.openv.filesystem.close"](fd);
+        } catch {}
     }
 }
 
-async function runDgramServer() {
-    let fd;
-    try {
-        fd = await openv.system["party.openv.filesystem.socket.create"]("dgram");
-        await openv.system["party.openv.filesystem.socket.bind"](fd, { path: socketPath });
-        await writeStdout("[" + now() + "] [" + workerName + "] dgram server bound socket=" + socketPath + "\\n");
-
-        while (true) {
-            const packet = await openv.system["party.openv.filesystem.socket.recvfrom"](fd, 4096);
-            const message = dec.decode(packet.data).trim();
-            const from = packet.address?.path ?? "(anonymous)";
-            await writeStdout("[" + now() + "] [" + workerName + "] datagram from=" + from + " message=" + message + "\\n");
-            if (message === "quit") {
-                await writeStdout("[" + now() + "] [" + workerName + "] quit received over dgram\\n");
-                await openv.system["party.openv.process.local.exit"](0);
-            }
-        }
-    } catch (err) {
-        await writeStdout("[" + now() + "] [" + workerName + "] ERROR " + String(err) + "\\n");
-        await openv.system["party.openv.process.local.exit"](1);
-    } finally {
-        try { if (fd !== undefined) await openv.system["party.openv.filesystem.close"](fd); } catch {}
-    }
-}
-
-async function runDgramClient() {
-    let fd;
-    try {
-        fd = await openv.system["party.openv.filesystem.socket.create"]("dgram");
-        const localPath = getArg("--local", "/demo-ipc/default.dgram.client.sock");
-        await openv.system["party.openv.filesystem.socket.bind"](fd, { path: localPath });
-        await writeStdout("[" + now() + "] [" + workerName + "] dgram client bound local=" + localPath + "\\n");
-
-        const messages = [
-            "hello-from-dgram-client",
-            "phase3-dgram-check",
-            "quit",
-        ];
-
-        for (const message of messages) {
-            await openv.system["party.openv.filesystem.socket.sendto"](fd, enc.encode(message + "\\n"), { path: socketPath });
-            await writeStdout("[" + now() + "] [" + workerName + "] sent datagram message=" + message + "\\n");
-        }
-
-        await openv.system["party.openv.process.local.exit"](0);
-    } catch (err) {
-        await writeStdout("[" + now() + "] [" + workerName + "] ERROR " + String(err) + "\\n");
-        await openv.system["party.openv.process.local.exit"](1);
-    } finally {
-        try { if (fd !== undefined) await openv.system["party.openv.filesystem.close"](fd); } catch {}
-    }
-}
-
-if (mode === "fifo") {
-    await runFifoMode();
-} else if (mode === "stream-server") {
-    await runStreamServer();
-} else if (mode === "stream-client") {
-    await runStreamClient();
-} else if (mode === "dgram-server") {
-    await runDgramServer();
-} else if (mode === "dgram-client") {
-    await runDgramClient();
-} else {
-    await writeStdout("[" + now() + "] [" + workerName + "] ERROR unknown mode='" + mode + "'\\n");
-    await openv.system["party.openv.process.local.exit"](2);
-}
+await main();
 `;
 
 const root = (document.getElementById("app") ?? document.body) as HTMLElement;
 root.innerHTML = `
-    <h2 style="margin:0 0 0.5rem 0">OpEnv IPC Demo</h2>
-    <p style="margin:0 0 0.75rem 0;font-size:12px;opacity:0.85">
-        Phase 1 (FIFO): spawn two long-running processes and control each over its named FIFO.<br>
-        Phase 2 (stream socket): spawn server/client processes and exchange messages over a path-bound stream socket.
-    </p>
+    <h2 style="margin:0 0 0.5rem 0">DOM</h2>
     <code>${FILE_PATH}</code>
     <textarea id="editor" rows="18" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12px">${DEFAULT_CONTENT}</textarea>
     <div style="margin-top:0.5rem;display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
         <button id="save">Save Script</button>
         <button id="load">Load Script</button>
-        <button id="spawn">Run FIFO Demo (2 procs)</button>
-        <button id="ping">Send Ping</button>
-        <button id="quit">Send Quit</button>
+        <button id="run">Run Demo</button>
         <button id="cleanup">Force Cleanup</button>
         <button id="proclist">List Processes</button>
-        <button id="phase2" title="Run stream socket server/client demo">Run Stream Socket Demo</button>
-        <button id="phase3" title="Run datagram socket demo">Run Datagram Socket Demo</button>
         <span id="status" style="font-size:12px"></span>
     </div>
     <details open style="margin-top:1rem">
@@ -332,28 +280,22 @@ root.innerHTML = `
 const editor = document.getElementById("editor")! as HTMLTextAreaElement;
 const saveBtn = document.getElementById("save")! as HTMLButtonElement;
 const loadBtn = document.getElementById("load")! as HTMLButtonElement;
-const spawnBtn = document.getElementById("spawn")! as HTMLButtonElement;
-const pingBtn = document.getElementById("ping")! as HTMLButtonElement;
-const quitBtn = document.getElementById("quit")! as HTMLButtonElement;
+const runBtn = document.getElementById("run")! as HTMLButtonElement;
 const cleanupBtn = document.getElementById("cleanup")! as HTMLButtonElement;
 const listBtn = document.getElementById("proclist")! as HTMLButtonElement;
-const phase2Btn = document.getElementById("phase2")! as HTMLButtonElement;
-const phase3Btn = document.getElementById("phase3")! as HTMLButtonElement;
 const statusEl = document.getElementById("status")! as HTMLSpanElement;
 const stdoutEl = document.getElementById("stdout")! as HTMLPreElement;
 const logEl = document.getElementById("log")! as HTMLPreElement;
 const enc = new TextEncoder();
 
-type DemoProc = {
+type ActiveProc = {
     name: string;
     pid: number;
-    fifoPath: string;
-    controlOfd: number;
     stdoutOfd?: number;
     stderrOfd?: number;
 };
 
-const active = new Map<number, DemoProc>();
+const active = new Map<number, ActiveProc>();
 
 function ts(): string {
     return new Date().toISOString();
@@ -385,15 +327,6 @@ async function ensureDir(path: string): Promise<void> {
     }
 }
 
-async function ensureFreshFifo(path: string): Promise<void> {
-    try {
-        await openv.system["party.openv.filesystem.write.unlink"](path);
-        log(`removed stale fifo ${path}`);
-    } catch {}
-    await openv.system["party.openv.filesystem.write.mkfifo"](path, 0o666);
-    log(`created fifo ${path}`);
-}
-
 async function closeOfdSafe(ofd: number | undefined): Promise<void> {
     if (ofd === undefined) return;
     try {
@@ -401,18 +334,6 @@ async function closeOfdSafe(ofd: number | undefined): Promise<void> {
     } catch (e) {
         log(`close ofd=${ofd} ignored: ${String(e)}`);
     }
-}
-
-async function openControlWriter(path: string): Promise<number> {
-    const ofd = await openv.system["party.openv.filesystem.open"](path, "w", 0o666);
-    log(`opened control writer ofd=${ofd} for ${path}`);
-    return ofd;
-}
-
-async function writeControl(proc: DemoProc, message: string): Promise<void> {
-    const payload = `${message}\n`;
-    await openv.system["party.openv.filesystem.write.write"](proc.controlOfd, enc.encode(payload));
-    log(`sent -> ${proc.name} (${proc.pid}) message='${message}'`);
 }
 
 function pumpOfd(label: string, pid: number, ofd: number): Promise<void> {
@@ -438,58 +359,7 @@ function pumpOfd(label: string, pid: number, ofd: number): Promise<void> {
     })();
 }
 
-async function spawnDemoWorker(name: string, fifoPath: string): Promise<DemoProc> {
-    const pid = await openv.system["party.openv.process.spawn"](FILE_PATH, [
-        FILE_PATH,
-        "--fifo",
-        fifoPath,
-        "--name",
-        name,
-    ], {
-        cwd: "/",
-        env: {},
-        stdio: [null, "pipe", "pipe"],
-    });
-
-    log(`spawned ${name} pid=${pid}`);
-    const stdio = await openv.system["party.openv.process.getstdio"](pid);
-    if (stdio.stdout === undefined) {
-        throw new Error(`missing stdout pipe for pid ${pid}`);
-    }
-
-    const proc: DemoProc = {
-        name,
-        pid,
-        fifoPath,
-        controlOfd: -1,
-        stdoutOfd: stdio.stdout,
-        stderrOfd: stdio.stderr,
-    };
-
-    pumpOfd("stdout", pid, stdio.stdout).catch((e) => log(`stdout pump failed pid=${pid}: ${String(e)}`));
-    if (stdio.stderr !== undefined) {
-        pumpOfd("stderr", pid, stdio.stderr).catch((e) => log(`stderr pump failed pid=${pid}: ${String(e)}`));
-    }
-
-    proc.controlOfd = await openControlWriter(fifoPath);
-    active.set(pid, proc);
-
-    (async () => {
-        const code = await openv.system["party.openv.process.wait"](pid);
-        log(`${name} pid=${pid} exited code=${String(code)}`);
-        await closeOfdSafe(proc.controlOfd);
-        active.delete(pid);
-        if (active.size === 0) {
-            setStatus("all demo processes exited", code === 0);
-        }
-    })().catch((e) => {
-        log(`wait failed pid=${pid}: ${String(e)}`);
-    });
-
-    return proc;
-}
-
-async function spawnPipedProcess(name: string, args: string[]): Promise<number> {
+async function spawnServer(name: string, args: string[]): Promise<number> {
     const pid = await openv.system["party.openv.process.spawn"](FILE_PATH, args, {
         cwd: "/",
         env: {},
@@ -504,6 +374,20 @@ async function spawnPipedProcess(name: string, args: string[]): Promise<number> 
     if (stdio.stderr !== undefined) {
         pumpOfd(`${name}:stderr`, pid, stdio.stderr).catch((e) => log(`${name} stderr pump failed pid=${pid}: ${String(e)}`));
     }
+
+    const proc: ActiveProc = { name, pid, stdoutOfd: stdio.stdout, stderrOfd: stdio.stderr };
+    active.set(pid, proc);
+
+    (async () => {
+        const code = await openv.system["party.openv.process.wait"](pid);
+        log(`${name} pid=${pid} exited code=${String(code)}`);
+        active.delete(pid);
+        if (active.size === 0) {
+            setStatus("server process exited", code === 0);
+        }
+    })().catch((e) => {
+        log(`wait failed pid=${pid}: ${String(e)}`);
+    });
 
     return pid;
 }
@@ -552,163 +436,37 @@ loadBtn.onclick = async () => {
     }
 };
 
-spawnBtn.onclick = async () => {
+runBtn.onclick = async () => {
     try {
         stdoutEl.textContent = "";
-        setStatus("starting two-process fifo demo...");
+        setStatus("running demo...");
 
         for (const proc of active.values()) {
-            await closeOfdSafe(proc.controlOfd);
+            await closeOfdSafe(proc.stdoutOfd);
+            await closeOfdSafe(proc.stderrOfd);
         }
         active.clear();
 
-        await ensureDir(FIFO_DIR);
-        await ensureFreshFifo(FIFO_A);
-        await ensureFreshFifo(FIFO_B);
-
-        const procA = await spawnDemoWorker("proc-A", FIFO_A);
-        const procB = await spawnDemoWorker("proc-B", FIFO_B);
-
-        await writeControl(procA, "hello-from-orchestrator");
-        await writeControl(procB, "hello-from-orchestrator");
-
-        setStatus(`running pids: ${procA.pid}, ${procB.pid}`, true);
-        log(`demo started with two workers over FIFOs ${FIFO_A} and ${FIFO_B}`);
-
+        await spawnServer("demo", [FILE_PATH]);
+        setStatus("demo running", true);
     } catch (e) {
-        setStatus(`error: ${e}`, false);
+        setStatus(`failed to run demo: ${e}`, false);
         log(`ERROR: ${e}`);
-    }
-};
-
-pingBtn.onclick = async () => {
-    try {
-        if (active.size === 0) {
-            setStatus("no running demo processes", false);
-            return;
-        }
-        for (const proc of active.values()) {
-            await writeControl(proc, `ping ${ts()}`);
-        }
-        setStatus(`sent ping to ${active.size} processes`, true);
-    } catch (e) {
-        setStatus(`ping failed: ${String(e)}`, false);
-        log(`ERROR: ping failed: ${String(e)}`);
-    }
-};
-
-quitBtn.onclick = async () => {
-    try {
-        if (active.size === 0) {
-            setStatus("no running demo processes", false);
-            return;
-        }
-        for (const proc of active.values()) {
-            await writeControl(proc, "quit");
-        }
-        setStatus(`quit sent to ${active.size} processes`);
-    } catch (e) {
-        setStatus(`quit failed: ${String(e)}`, false);
-        log(`ERROR: quit failed: ${String(e)}`);
     }
 };
 
 cleanupBtn.onclick = async () => {
     try {
         for (const proc of active.values()) {
-            await closeOfdSafe(proc.controlOfd);
+            await closeOfdSafe(proc.stdoutOfd);
+            await closeOfdSafe(proc.stderrOfd);
         }
         active.clear();
-        try { await openv.system["party.openv.filesystem.write.unlink"](FIFO_A); } catch {}
-        try { await openv.system["party.openv.filesystem.write.unlink"](FIFO_B); } catch {}
         setStatus("cleanup complete", true);
         log("forced cleanup complete");
     } catch (e) {
         setStatus(`cleanup failed: ${String(e)}`, false);
         log(`ERROR: cleanup failed: ${String(e)}`);
-    }
-};
-
-phase2Btn.onclick = async () => {
-    try {
-        stdoutEl.textContent = "";
-        setStatus("starting phase 2 stream socket demo...");
-
-        await ensureDir(FIFO_DIR);
-        try { await openv.system["party.openv.filesystem.write.unlink"](STREAM_SOCKET_PATH); } catch {}
-
-        const serverPid = await spawnPipedProcess("phase2-server", [
-            FILE_PATH,
-            "--mode", "stream-server",
-            "--name", "stream-server",
-            "--socket", STREAM_SOCKET_PATH,
-        ]);
-
-        await new Promise((resolve) => setTimeout(resolve, 50));
-
-        const clientPid = await spawnPipedProcess("phase2-client", [
-            FILE_PATH,
-            "--mode", "stream-client",
-            "--name", "stream-client",
-            "--socket", STREAM_SOCKET_PATH,
-        ]);
-
-        const [serverCode, clientCode] = await Promise.all([
-            openv.system["party.openv.process.wait"](serverPid),
-            openv.system["party.openv.process.wait"](clientPid),
-        ]);
-
-        try { await openv.system["party.openv.filesystem.write.unlink"](STREAM_SOCKET_PATH); } catch {}
-
-        const ok = serverCode === 0 && clientCode === 0;
-        setStatus(`phase2 complete: server=${String(serverCode)} client=${String(clientCode)}`, ok);
-        log(`phase2 stream demo finished server=${String(serverCode)} client=${String(clientCode)}`);
-    } catch (e) {
-        setStatus(`phase2 failed: ${String(e)}`, false);
-        log(`ERROR: phase2 failed: ${String(e)}`);
-    }
-};
-
-phase3Btn.onclick = async () => {
-    try {
-        stdoutEl.textContent = "";
-        setStatus("starting phase 3 datagram demo...");
-
-        await ensureDir(FIFO_DIR);
-        try { await openv.system["party.openv.filesystem.write.unlink"](DGRAM_SERVER_PATH); } catch {}
-        try { await openv.system["party.openv.filesystem.write.unlink"](DGRAM_CLIENT_PATH); } catch {}
-
-        const serverPid = await spawnPipedProcess("phase3-server", [
-            FILE_PATH,
-            "--mode", "dgram-server",
-            "--name", "dgram-server",
-            "--socket", DGRAM_SERVER_PATH,
-        ]);
-
-        await new Promise((resolve) => setTimeout(resolve, 50));
-
-        const clientPid = await spawnPipedProcess("phase3-client", [
-            FILE_PATH,
-            "--mode", "dgram-client",
-            "--name", "dgram-client",
-            "--socket", DGRAM_SERVER_PATH,
-            "--local", DGRAM_CLIENT_PATH,
-        ]);
-
-        const [serverCode, clientCode] = await Promise.all([
-            openv.system["party.openv.process.wait"](serverPid),
-            openv.system["party.openv.process.wait"](clientPid),
-        ]);
-
-        try { await openv.system["party.openv.filesystem.write.unlink"](DGRAM_SERVER_PATH); } catch {}
-        try { await openv.system["party.openv.filesystem.write.unlink"](DGRAM_CLIENT_PATH); } catch {}
-
-        const ok = serverCode === 0 && clientCode === 0;
-        setStatus(`phase3 complete: server=${String(serverCode)} client=${String(clientCode)}`, ok);
-        log(`phase3 datagram demo finished server=${String(serverCode)} client=${String(clientCode)}`);
-    } catch (e) {
-        setStatus(`phase3 failed: ${String(e)}`, false);
-        log(`ERROR: phase3 failed: ${String(e)}`);
     }
 };
 

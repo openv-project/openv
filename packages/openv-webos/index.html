@@ -1,49 +1,52 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
     <title>OpEnv IPC Demo</title>
     <style>
-        :root {
-            color-scheme: light;
-            --bg: #f5f6f8;
-            --panel: #ffffff;
-            --text: #1d2430;
-            --muted: #5f6978;
-            --border: #cfd7e3;
-        }
+      :root {
+        color-scheme: light;
+        --bg: #f5f6f8;
+        --panel: #ffffff;
+        --text: #1d2430;
+        --muted: #5f6978;
+        --border: #cfd7e3;
+      }
 
-        body {
-            margin: 0;
-            background: radial-gradient(circle at top, #ffffff, var(--bg));
-            color: var(--text);
-            font-family: "IBM Plex Mono", "Consolas", "Menlo", monospace;
-        }
+      body {
+        margin: 0;
+        background: radial-gradient(circle at top, #ffffff, var(--bg));
+        color: var(--text);
+        font-family: "IBM Plex Mono", "Consolas", "Menlo", monospace;
+      }
 
-        #app {
-            max-width: 1100px;
-            margin: 1rem auto;
-            padding: 1rem;
-            border: 1px solid var(--border);
-            background: var(--panel);
-            box-shadow: 0 8px 30px rgba(20, 32, 50, 0.08);
-        }
+      #app {
+        max-width: 1100px;
+        margin: 1rem auto;
+        padding: 1rem;
+        border: 1px solid var(--border);
+        background: var(--panel);
+        box-shadow: 0 8px 30px rgba(20, 32, 50, 0.08);
+      }
 
-        noscript {
-            display: block;
-            margin: 1rem auto;
-            max-width: 1100px;
-            padding: 1rem;
-            border: 1px solid #a33;
-            color: #a33;
-            background: #fff5f5;
-        }
+      noscript {
+        display: block;
+        margin: 1rem auto;
+        max-width: 1100px;
+        padding: 1rem;
+        border: 1px solid #a33;
+        color: #a33;
+        background: #fff5f5;
+      }
     </style>
-</head>
-<body>
-    <noscript>JavaScript is required to run the OpEnv FIFO process demo.</noscript>
+  </head>
+  <body>
+    <noscript
+      >JavaScript is required to run the OpEnv FIFO process demo.</noscript
+    >
     <main id="app" aria-live="polite"></main>
+    <div id="root"></div>
     <script type="module" src="/@/srv/openv-webos/mod.js"></script>
-</body>
+  </body>
 </html>

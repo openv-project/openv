@@ -14,5 +14,9 @@
         "nanotar": "^0.3.0",
         "tsx": "^4.19.0",
         "typescript": "^5.9.3"
+    },
+    "dependencies": {
+        "@openv-project/openv-webos": "^0.1.0",
+        "@remote-dom/core": "^1.10.1"
     }
 }
