@@ -1,12 +1,12 @@
 import type { SystemComponent } from "./mod.ts";
 
-export const DOM_NAMESPACE = "party.openv.dom" as const;
-export const DOM_NAMESPACE_VERSIONED = `${DOM_NAMESPACE}/0.1.0` as const;
+export type DOM_NAMESPACE = "party.openv.dom";
+export type DOM_NAMESPACE_VERSIONED = "party.openv.dom/0.1.0";
 
-export const VDOM_NAMESPACE = "party.openv.dom.virtual" as const;
-export const VDOM_NAMESPACE_VERSIONED = `${VDOM_NAMESPACE}/0.1.0` as const;
+export type VDOM_NAMESPACE = "party.openv.dom.virtual";
+export type VDOM_NAMESPACE_VERSIONED = "party.openv.dom.virtual/0.1.0";
 
-export interface DOMComponent extends SystemComponent<typeof DOM_NAMESPACE_VERSIONED, typeof DOM_NAMESPACE> {
+export interface DOMComponent extends SystemComponent<DOM_NAMESPACE_VERSIONED, DOM_NAMESPACE> {
 
   ["party.openv.dom.listRoots"](): Promise<string[]>;
 
@@ -87,7 +87,7 @@ export interface DOMComponent extends SystemComponent<typeof DOM_NAMESPACE_VERSI
   }>;
 }
 
-export interface VDOMComponent extends SystemComponent<typeof VDOM_NAMESPACE_VERSIONED, typeof VDOM_NAMESPACE> {
+export interface VDOMComponent extends SystemComponent<VDOM_NAMESPACE_VERSIONED, VDOM_NAMESPACE> {
   ["party.openv.dom.virtual.create"](rootId: string): Promise<number>;
 
   ["party.openv.dom.virtual.destroy"](rootId: number): Promise<void>;

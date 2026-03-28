@@ -1,4 +1,4 @@
-import { PROCESS_LOCAL_NAMESPACE, PROCESS_LOCAL_NAMESPACE_VERSIONED, PROCESS_NAMESPACE, PROCESS_NAMESPACE_VERSIONED, PROCESS_SIGNAL_NOTIFYEXIT, SystemComponent, type ProcessComponent, type ProcessExecutorInfo, type ProcessLocalComponent, type ProcessSpawnOptions, type SpawnStdioResult, type StdioOption } from "@openv-project/openv-api";
+import type { PROCESS_LOCAL_NAMESPACE, PROCESS_LOCAL_NAMESPACE_VERSIONED, PROCESS_NAMESPACE, PROCESS_NAMESPACE_VERSIONED, PROCESS_SIGNAL_NOTIFYEXIT, SystemComponent, ProcessComponent, ProcessExecutorInfo, ProcessLocalComponent, ProcessSpawnOptions, SpawnStdioResult, StdioOption } from "@openv-project/openv-api";
 import type { CoreFSExt } from "../fs.ts";
 
 type SignalHandler = (cx: { signal: string; uid: number; gid: number; pid: number }) => Promise<void>;
@@ -340,7 +340,7 @@ export class CoreProcess implements ProcessComponent, CoreProcessExt {
 
     async ["party.openv.impl.process.deliverSignal"](senderPid: number, targetPid: number, signal: string): Promise<void> {
         if (targetPid === 0) {
-            if (signal === PROCESS_SIGNAL_NOTIFYEXIT) {
+            if (signal === "party.openv.process.signals.notifyexit") {
                 const entry = this.#processTable.get(senderPid);
                 if (entry) {
                     entry.running = false;
@@ -360,7 +360,7 @@ export class CoreProcess implements ProcessComponent, CoreProcessExt {
             throw new Error(`Process ${targetPid} is not running.`);
         }
 
-        if (signal === PROCESS_SIGNAL_NOTIFYEXIT) {
+        if (signal === "party.openv.process.signals.notifyexit") {
             for (const resolve of entry.waiters) {
                 resolve(entry.exitCode);
             }
@@ -472,10 +472,10 @@ export class CoreProcess implements ProcessComponent, CoreProcessExt {
         return pid;
     }
 
-    supports(ns: typeof PROCESS_NAMESPACE_VERSIONED | typeof PROCESS_NAMESPACE): Promise<typeof PROCESS_NAMESPACE_VERSIONED>;
+    supports(ns: PROCESS_NAMESPACE_VERSIONED | PROCESS_NAMESPACE): Promise<PROCESS_NAMESPACE_VERSIONED>;
     supports(ns: typeof CORE_PROCESS_EXT_NAMESPACE_VERSIONED | typeof CORE_PROCESS_EXT_NAMESPACE): Promise<typeof CORE_PROCESS_EXT_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
-        if (ns === PROCESS_NAMESPACE || ns === PROCESS_NAMESPACE_VERSIONED) return PROCESS_NAMESPACE_VERSIONED;
+        if (ns === "party.openv.process" || ns === "party.openv.process/0.1.0") return "party.openv.process/0.1.0";
         if (ns === CORE_PROCESS_EXT_NAMESPACE || ns === CORE_PROCESS_EXT_NAMESPACE_VERSIONED) return CORE_PROCESS_EXT_NAMESPACE_VERSIONED;
         return null;
     }
@@ -592,12 +592,12 @@ export class ProcessScopedProcess implements ProcessComponent, ProcessLocalCompo
         await this.#process["party.openv.impl.process.exitProcess"](this.#pid, code);
 
         if (self.ppid !== 0) {
-            await this.#process["party.openv.impl.process.deliverSignal"](this.#pid, self.ppid, PROCESS_SIGNAL_NOTIFYEXIT).catch(() => {
+            await this.#process["party.openv.impl.process.deliverSignal"](this.#pid, self.ppid, "party.openv.process.signals.notifyexit").catch(() => {
                 // RIP parent :(
             });
         }
 
-        await this.#process["party.openv.impl.process.deliverSignal"](this.#pid, 0, PROCESS_SIGNAL_NOTIFYEXIT).catch(() => {
+        await this.#process["party.openv.impl.process.deliverSignal"](this.#pid, 0, "party.openv.process.signals.notifyexit").catch(() => {
             // This is probably fine um
             console.warn('this is fine 🔥🔥');
         });
@@ -687,14 +687,14 @@ export class ProcessScopedProcess implements ProcessComponent, ProcessLocalCompo
         entry.signalHandlers.delete(signal);
     }
 
-    supports(ns: typeof PROCESS_NAMESPACE_VERSIONED | typeof PROCESS_NAMESPACE): Promise<typeof PROCESS_NAMESPACE_VERSIONED>;
-    supports(ns: typeof PROCESS_LOCAL_NAMESPACE_VERSIONED | typeof PROCESS_LOCAL_NAMESPACE): Promise<typeof PROCESS_LOCAL_NAMESPACE_VERSIONED>;
+    supports(ns: PROCESS_NAMESPACE_VERSIONED | PROCESS_NAMESPACE): Promise<PROCESS_NAMESPACE_VERSIONED>;
+    supports(ns: PROCESS_LOCAL_NAMESPACE_VERSIONED | PROCESS_LOCAL_NAMESPACE): Promise<PROCESS_LOCAL_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
-        if (ns === PROCESS_NAMESPACE || ns === PROCESS_NAMESPACE_VERSIONED) {
-            return PROCESS_NAMESPACE_VERSIONED;
+        if (ns === "party.openv.process" || ns === "party.openv.process/0.1.0") {
+            return "party.openv.process/0.1.0";
         }
-        if (ns === PROCESS_LOCAL_NAMESPACE || ns === PROCESS_LOCAL_NAMESPACE_VERSIONED) {
-            return PROCESS_LOCAL_NAMESPACE_VERSIONED;
+        if (ns === "party.openv.process.local" || ns === "party.openv.process.local/0.1.0") {
+            return "party.openv.process.local/0.1.0";
         }
         return null;
     }

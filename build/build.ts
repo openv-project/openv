@@ -21,8 +21,9 @@ const STAGE0_PACKAGES: Array<{
     src: string;
     stage0Path: string;
     distName: string;
+    typesOnly?: boolean;
 }> = [
-    { src: "packages/openv-api", stage0Path: "/lib/openv/openv-api", distName: "openv-api" },
+    { src: "packages/openv-api", stage0Path: "/lib/openv/openv-api", distName: "openv-api", typesOnly: true },
     { src: "packages/openv-core", stage0Path: "/lib/openv/openv-core", distName: "openv-core" },
     { src: "packages/party.openv.api.fs", stage0Path: "/lib/openv/api/fs", distName: "party.openv.api.fs" },
     { src: "packages/party.openv.api.registry", stage0Path: "/lib/openv/api/registry", distName: "party.openv.api.registry" },
@@ -230,30 +231,35 @@ for (const pkg of STAGE0_PACKAGES) {
     const srcDir = join(ROOT, pkg.src);
     const stageDir = join(STAGE0_STAGING, pkg.stage0Path);
 
-    let tsFiles = (await collectFiles(srcDir, [".ts"]))
-        .filter(f => !f.endsWith(".d.ts"));
+    // Skip JS compilation for types-only packages
+    if (!pkg.typesOnly) {
+        let tsFiles = (await collectFiles(srcDir, [".ts"]))
+            .filter(f => !f.endsWith(".d.ts"));
 
-    // For remote-dom packages, only include non-test files
-    if (pkg.distName.startsWith("remote-dom-")) {
-        tsFiles = tsFiles.filter(f => !f.includes("/tests/") && !f.endsWith(".test.ts"));
+        // For remote-dom packages, only include non-test files
+        if (pkg.distName.startsWith("remote-dom-")) {
+            tsFiles = tsFiles.filter(f => !f.includes("/tests/") && !f.endsWith(".test.ts"));
+        }
+
+        if (tsFiles.length > 0) {
+            await esbuild.build({
+                entryPoints: tsFiles,
+                outdir: stageDir,
+                outbase: srcDir,
+                format: "esm",
+                bundle: true, 
+                packages: "external",
+                platform: "browser",
+                minify: true,
+                sourcemap: true,
+                target: "es2022",
+                plugins: [importRewriter],
+            });
+            console.log(`  js: ${pkg.distName} (${tsFiles.length} files)`);
+        }
+    } else {
+        console.log(`  js: ${pkg.distName} (types-only, skipped)`);
     }
-
-    if (tsFiles.length === 0) continue;
-
-    await esbuild.build({
-        entryPoints: tsFiles,
-        outdir: stageDir,
-        outbase: srcDir,
-        format: "esm",
-        bundle: true, 
-        packages: "external",
-        platform: "browser",
-        minify: true,
-        sourcemap: true,
-        target: "es2022",
-        plugins: [importRewriter],
-    });
-    console.log(`  js: ${pkg.distName} (${tsFiles.length} files)`);
 
     const tscOut = join(ROOT, "dist-types", pkg.distName);
     if (existsSync(tscOut)) {

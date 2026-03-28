@@ -47,20 +47,20 @@ export interface SpawnStdioResult {
     stderr?: number;
 }
 
-export const FS_NAMESPACE = "party.openv.filesystem" as const;
-export const FS_NAMESPACE_VERSIONED = `${FS_NAMESPACE}/0.1.0` as const;
-export const FS_READ_NAMESPACE = `${FS_NAMESPACE}.read` as const;
-export const FS_READ_NAMESPACE_VERSIONED = `${FS_READ_NAMESPACE}/0.1.0` as const;
-export const FS_WRITE_NAMESPACE = `${FS_NAMESPACE}.write` as const;
-export const FS_WRITE_NAMESPACE_VERSIONED = `${FS_WRITE_NAMESPACE}/0.1.0` as const;
-export const FS_VIRTUAL_NAMESPACE = `${FS_NAMESPACE}.virtual` as const;
-export const FS_VIRTUAL_NAMESPACE_VERSIONED = `${FS_VIRTUAL_NAMESPACE}/0.1.0` as const;
-export const FS_LOCAL_NAMESPACE = `${FS_NAMESPACE}.local` as const;
-export const FS_LOCAL_NAMESPACE_VERSIONED = `${FS_LOCAL_NAMESPACE}/0.1.0` as const;
-export const FS_PIPE_NAMESPACE = `${FS_NAMESPACE}.pipe` as const;
-export const FS_PIPE_NAMESPACE_VERSIONED = `${FS_PIPE_NAMESPACE}/0.1.0` as const;
-export const FS_SOCKET_NAMESPACE = `${FS_NAMESPACE}.socket` as const;
-export const FS_SOCKET_NAMESPACE_VERSIONED = `${FS_SOCKET_NAMESPACE}/0.1.0` as const;
+export type FS_NAMESPACE = "party.openv.filesystem";
+export type FS_NAMESPACE_VERSIONED = "party.openv.filesystem/0.1.0";
+export type FS_READ_NAMESPACE = "party.openv.filesystem.read";
+export type FS_READ_NAMESPACE_VERSIONED = "party.openv.filesystem.read/0.1.0";
+export type FS_WRITE_NAMESPACE = "party.openv.filesystem.write";
+export type FS_WRITE_NAMESPACE_VERSIONED = "party.openv.filesystem.write/0.1.0";
+export type FS_VIRTUAL_NAMESPACE = "party.openv.filesystem.virtual";
+export type FS_VIRTUAL_NAMESPACE_VERSIONED = "party.openv.filesystem.virtual/0.1.0";
+export type FS_LOCAL_NAMESPACE = "party.openv.filesystem.local";
+export type FS_LOCAL_NAMESPACE_VERSIONED = "party.openv.filesystem.local/0.1.0";
+export type FS_PIPE_NAMESPACE = "party.openv.filesystem.pipe";
+export type FS_PIPE_NAMESPACE_VERSIONED = "party.openv.filesystem.pipe/0.1.0";
+export type FS_SOCKET_NAMESPACE = "party.openv.filesystem.socket";
+export type FS_SOCKET_NAMESPACE_VERSIONED = "party.openv.filesystem.socket/0.1.0";
 
 export type FileSystemSocketType = "stream" | "dgram";
 
@@ -79,7 +79,7 @@ export interface SocketAddress {
  * environment: a global open file number in the system environment, or a local file
  * descriptor in the process environment.
  */
-export interface FileSystemCoreComponent extends SystemComponent<typeof FS_NAMESPACE_VERSIONED, typeof FS_NAMESPACE> {
+export interface FileSystemCoreComponent extends SystemComponent<FS_NAMESPACE_VERSIONED, FS_NAMESPACE> {
     /**
      * Open a file at the given path. In the system environment, returns a global open file
      * number. In a process-scoped environment, returns a process-local file descriptor.
@@ -95,7 +95,7 @@ export interface FileSystemCoreComponent extends SystemComponent<typeof FS_NAMES
  * A system component for read file system operations.
  * This component supports all of the most basic file operations, but only in read mode.
  */
-export interface FileSystemReadOnlyComponent extends SystemComponent<typeof FS_READ_NAMESPACE_VERSIONED, typeof FS_READ_NAMESPACE> {
+export interface FileSystemReadOnlyComponent extends SystemComponent<FS_READ_NAMESPACE_VERSIONED, FS_READ_NAMESPACE> {
     ["party.openv.filesystem.read.stat"](path: string): Promise<FsStats>;
     /**
      * Read from an open file. Accepts the same kind of number that `open` returned
@@ -115,7 +115,7 @@ export interface FileSystemReadOnlyComponent extends SystemComponent<typeof FS_R
  * This component supports all of the most basic file operations, which
  * allows for both reading and writing to files when fs/read is implemented.
  */
-export interface FileSystemReadWriteComponent extends SystemComponent<typeof FS_WRITE_NAMESPACE_VERSIONED, typeof FS_WRITE_NAMESPACE> {
+export interface FileSystemReadWriteComponent extends SystemComponent<FS_WRITE_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE> {
     /**
      * Write to an open file. Accepts the same kind of number that `open` returned
      * (global open file number in system environment, local fd in process environment).
@@ -136,7 +136,7 @@ export interface FileSystemReadWriteComponent extends SystemComponent<typeof FS_
  * available in a process-scoped environment (similar to ProcessLocalComponent for processes).
  * It provides operations specific to the current process's file descriptor table.
  */
-export interface FileSystemLocalComponent extends SystemComponent<typeof FS_LOCAL_NAMESPACE_VERSIONED, typeof FS_LOCAL_NAMESPACE> {
+export interface FileSystemLocalComponent extends SystemComponent<FS_LOCAL_NAMESPACE_VERSIONED, FS_LOCAL_NAMESPACE> {
     /**
      * Get a list of all open file descriptors for the current process.
      */
@@ -168,7 +168,7 @@ export interface FileSystemLocalComponent extends SystemComponent<typeof FS_LOCA
  * that are members of the open file table. Pipe methods return open file numbers in system environment
  * and local fds in process environment.
  */
-export interface FileSystemPipeComponent extends SystemComponent<typeof FS_PIPE_NAMESPACE_VERSIONED, typeof FS_PIPE_NAMESPACE> {
+export interface FileSystemPipeComponent extends SystemComponent<FS_PIPE_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE> {
     /**
      * Create an anonymous unidirectional pipe.
      * The returned file numbers/fds are ordered as [readEnd, writeEnd], where readEnd is readable and writeEnd is writable.
@@ -180,7 +180,7 @@ export interface FileSystemPipeComponent extends SystemComponent<typeof FS_PIPE_
  * Socket capabilities that are not expressible through plain open/read/write alone.
  * Data transfer for connected stream sockets still uses filesystem read/write.
  */
-export interface FileSystemSocketComponent extends SystemComponent<typeof FS_SOCKET_NAMESPACE_VERSIONED, typeof FS_SOCKET_NAMESPACE> {
+export interface FileSystemSocketComponent extends SystemComponent<FS_SOCKET_NAMESPACE_VERSIONED, FS_SOCKET_NAMESPACE> {
     ["party.openv.filesystem.socket.create"](type: FileSystemSocketType): Promise<number>;
     ["party.openv.filesystem.socket.bind"](fd: number, address: SocketAddress): Promise<void>;
     ["party.openv.filesystem.socket.listen"](fd: number, backlog?: number): Promise<void>;
@@ -190,7 +190,7 @@ export interface FileSystemSocketComponent extends SystemComponent<typeof FS_SOC
     ["party.openv.filesystem.socket.recvfrom"](fd: number, maxLength: number): Promise<{ data: Uint8Array; address: SocketAddress | null }>;
 }
 
-export interface FileSystemVirtualComponent extends SystemComponent<typeof FS_VIRTUAL_NAMESPACE_VERSIONED, typeof FS_VIRTUAL_NAMESPACE> {
+export interface FileSystemVirtualComponent extends SystemComponent<FS_VIRTUAL_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE> {
     ["party.openv.filesystem.virtual.create"](id: string): Promise<void>;
     ["party.openv.filesystem.virtual.destroy"](id: string): Promise<void>;
     ["party.openv.filesystem.virtual.mount"](id: string, path: string, extra?: PlainParameter): Promise<void>;
@@ -229,8 +229,8 @@ export interface FileSystemVirtualComponent extends SystemComponent<typeof FS_VI
     ["party.openv.filesystem.virtual.onsync"](id: string, handler: (ofd: number) => Promise<void>): Promise<void>;
 }
 
-export const FS_SYNC_NAMESPACE = `${FS_NAMESPACE}.sync` as const;
-export const FS_SYNC_NAMESPACE_VERSIONED = `${FS_SYNC_NAMESPACE}/0.1.0` as const;
+export type FS_SYNC_NAMESPACE = "party.openv.filesystem.sync";
+export type FS_SYNC_NAMESPACE_VERSIONED = "party.openv.filesystem.sync/0.1.0";
 
 /**
  * This component is implemented on filesystems that support explicit sync, where data may stay buffered
@@ -241,6 +241,6 @@ export const FS_SYNC_NAMESPACE_VERSIONED = `${FS_SYNC_NAMESPACE}/0.1.0` as const
  * For VFS: If your VFS does not support buffering, do not call `party.openv.filesystem.virtual.onsync` at all. 
  * The VFS layer should guard against missing sync support by acting like a no-op if the sync method is not implemented.
  */
-export interface FileSystemSyncComponent extends SystemComponent<typeof FS_SYNC_NAMESPACE_VERSIONED, typeof FS_SYNC_NAMESPACE> {
+export interface FileSystemSyncComponent extends SystemComponent<FS_SYNC_NAMESPACE_VERSIONED, FS_SYNC_NAMESPACE> {
     ["party.openv.filesystem.sync.sync"](ofd: number): Promise<void>;
 }

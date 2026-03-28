@@ -1,4 +1,4 @@
-import { ProcessComponent, REGISTRY_READ_NAMESPACE, REGISTRY_READ_NAMESPACE_VERSIONED, REGISTRY_WRITE_NAMESPACE, REGISTRY_WRITE_NAMESPACE_VERSIONED, RegistryEntryWatchEvent, RegistryKeyWatchEvent, RegistryReadComponent, RegistryValue, RegistryWatchEvent, RegistryWatchOptions, RegistryWatcher, RegistryWriteComponent, SystemComponent } from "@openv-project/openv-api";
+import type { ProcessComponent, REGISTRY_READ_NAMESPACE, REGISTRY_READ_NAMESPACE_VERSIONED, REGISTRY_WRITE_NAMESPACE, REGISTRY_WRITE_NAMESPACE_VERSIONED, RegistryEntryWatchEvent, RegistryKeyWatchEvent, RegistryReadComponent, RegistryValue, RegistryWatchEvent, RegistryWatchOptions, RegistryWatcher, RegistryWriteComponent, SystemComponent } from "@openv-project/openv-api";
 import { CoreProcessExt } from "./mod";
 
 const CORE_REGISTRY_EXT_NAMESPACE = "party.openv.impl.registry" as const;
@@ -346,17 +346,17 @@ export class CoreRegistry implements RegistryReadComponent, RegistryWriteCompone
         return this.#makeWatchIterable(this.#allWatchers, watchKey);
     }
 
-    async supports(ns: typeof REGISTRY_READ_NAMESPACE | typeof REGISTRY_READ_NAMESPACE_VERSIONED): Promise<typeof REGISTRY_READ_NAMESPACE_VERSIONED>;
-    async supports(ns: typeof REGISTRY_WRITE_NAMESPACE | typeof REGISTRY_WRITE_NAMESPACE_VERSIONED): Promise<typeof REGISTRY_WRITE_NAMESPACE_VERSIONED>;
+    async supports(ns: REGISTRY_READ_NAMESPACE | REGISTRY_READ_NAMESPACE_VERSIONED): Promise<REGISTRY_READ_NAMESPACE_VERSIONED>;
+    async supports(ns: REGISTRY_WRITE_NAMESPACE | REGISTRY_WRITE_NAMESPACE_VERSIONED): Promise<REGISTRY_WRITE_NAMESPACE_VERSIONED>;
     async supports(ns: typeof CORE_REGISTRY_EXT_NAMESPACE_VERSIONED | typeof CORE_REGISTRY_EXT_NAMESPACE): Promise<typeof CORE_REGISTRY_EXT_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
         switch (ns) {
-            case REGISTRY_READ_NAMESPACE:
-            case REGISTRY_READ_NAMESPACE_VERSIONED:
-                return REGISTRY_READ_NAMESPACE_VERSIONED;
-            case REGISTRY_WRITE_NAMESPACE:
-            case REGISTRY_WRITE_NAMESPACE_VERSIONED:
-                return REGISTRY_WRITE_NAMESPACE_VERSIONED;
+            case "party.openv.registry.read":
+            case "party.openv.registry.read/0.1.0":
+                return "party.openv.registry.read/0.1.0";
+            case "party.openv.registry.write":
+            case "party.openv.registry.write/0.1.0":
+                return "party.openv.registry.write/0.1.0";
             case CORE_REGISTRY_EXT_NAMESPACE:
             case CORE_REGISTRY_EXT_NAMESPACE_VERSIONED:
                 return CORE_REGISTRY_EXT_NAMESPACE_VERSIONED;
@@ -573,16 +573,16 @@ export class ProcessScopedRegistry implements RegistryReadComponent, RegistryWri
         return this.#system["party.openv.registry.write.deleteKey"](key);
     }
 
-    supports(ns: typeof REGISTRY_READ_NAMESPACE | typeof REGISTRY_READ_NAMESPACE_VERSIONED): Promise<typeof REGISTRY_READ_NAMESPACE_VERSIONED>;
-    supports(ns: typeof REGISTRY_WRITE_NAMESPACE | typeof REGISTRY_WRITE_NAMESPACE_VERSIONED): Promise<typeof REGISTRY_WRITE_NAMESPACE_VERSIONED>;
+    supports(ns: REGISTRY_READ_NAMESPACE | REGISTRY_READ_NAMESPACE_VERSIONED): Promise<REGISTRY_READ_NAMESPACE_VERSIONED>;
+    supports(ns: REGISTRY_WRITE_NAMESPACE | REGISTRY_WRITE_NAMESPACE_VERSIONED): Promise<REGISTRY_WRITE_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
         switch (ns) {
-            case REGISTRY_READ_NAMESPACE:
-            case REGISTRY_READ_NAMESPACE_VERSIONED:
-                return REGISTRY_READ_NAMESPACE_VERSIONED;
-            case REGISTRY_WRITE_NAMESPACE:
-            case REGISTRY_WRITE_NAMESPACE_VERSIONED:
-                return REGISTRY_WRITE_NAMESPACE_VERSIONED;
+            case "party.openv.registry.read":
+            case "party.openv.registry.read/0.1.0":
+                return "party.openv.registry.read/0.1.0";
+            case "party.openv.registry.write":
+            case "party.openv.registry.write/0.1.0":
+                return "party.openv.registry.write/0.1.0";
             default:
                 return null;
         }

@@ -1,4 +1,4 @@
-import { FileSystemCoreComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, ProcessComponent } from "@openv-project/openv-api";
+import type { FileSystemCoreComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, ProcessComponent } from "@openv-project/openv-api";
 import { CoreFSExt, CoreProcessExt, CoreSystemLinkPeer, createPostMessageTransport, ProcessScopedFS, ProcessScopedProcess, ProcessSpawnContext } from "../../mod.ts";
 
 export type ProcessEnvBuilder = (ctx: ProcessSpawnContext) => Promise<Record<string, Function>>;

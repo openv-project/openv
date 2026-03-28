@@ -1,4 +1,4 @@
-import { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemSocketComponent, FileSystemSocketType, FileSystemSyncComponent, FileSystemVirtualComponent, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_SOCKET_NAMESPACE, FS_SOCKET_NAMESPACE_VERSIONED, FS_SYNC_NAMESPACE, FS_SYNC_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, PlainParameter, ProcessComponent, SocketAddress, SystemComponent } from "@openv-project/openv-api"
+import type { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemSocketComponent, FileSystemSocketType, FileSystemSyncComponent, FileSystemVirtualComponent, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_SOCKET_NAMESPACE, FS_SOCKET_NAMESPACE_VERSIONED, FS_SYNC_NAMESPACE, FS_SYNC_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, PlainParameter, ProcessComponent, SocketAddress, SystemComponent } from "@openv-project/openv-api"
 import { CoreProcessExt } from "./mod";
 
 type VFS = {
@@ -1412,13 +1412,13 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     }
 
     supports(ns: typeof CORE_FS_EXT_NAMESPACE_VERSIONED | typeof CORE_FS_EXT_NAMESPACE): Promise<typeof CORE_FS_EXT_NAMESPACE_VERSIONED>;
-    supports(ns: typeof FS_PIPE_NAMESPACE | typeof FS_PIPE_NAMESPACE_VERSIONED): Promise<typeof FS_PIPE_NAMESPACE_VERSIONED>;
-    supports(ns: typeof FS_VIRTUAL_NAMESPACE | typeof FS_VIRTUAL_NAMESPACE_VERSIONED): Promise<typeof FS_VIRTUAL_NAMESPACE_VERSIONED>;
-    supports(ns: typeof FS_READ_NAMESPACE | typeof FS_READ_NAMESPACE_VERSIONED): Promise<typeof FS_READ_NAMESPACE_VERSIONED>;
-    supports(ns: typeof FS_WRITE_NAMESPACE | typeof FS_WRITE_NAMESPACE_VERSIONED): Promise<typeof FS_WRITE_NAMESPACE_VERSIONED>;
-    supports(ns: typeof FS_SOCKET_NAMESPACE | typeof FS_SOCKET_NAMESPACE_VERSIONED): Promise<typeof FS_SOCKET_NAMESPACE_VERSIONED>;
-    supports(ns: typeof FS_SYNC_NAMESPACE | typeof FS_SYNC_NAMESPACE_VERSIONED): Promise<typeof FS_SYNC_NAMESPACE_VERSIONED>;
-    supports(ns: typeof FS_NAMESPACE | typeof FS_NAMESPACE_VERSIONED): Promise<typeof FS_NAMESPACE_VERSIONED>;
+    supports(ns: FS_PIPE_NAMESPACE | FS_PIPE_NAMESPACE_VERSIONED): Promise<FS_PIPE_NAMESPACE_VERSIONED>;
+    supports(ns: FS_VIRTUAL_NAMESPACE | FS_VIRTUAL_NAMESPACE_VERSIONED): Promise<FS_VIRTUAL_NAMESPACE_VERSIONED>;
+    supports(ns: FS_READ_NAMESPACE | FS_READ_NAMESPACE_VERSIONED): Promise<FS_READ_NAMESPACE_VERSIONED>;
+    supports(ns: FS_WRITE_NAMESPACE | FS_WRITE_NAMESPACE_VERSIONED): Promise<FS_WRITE_NAMESPACE_VERSIONED>;
+    supports(ns: FS_SOCKET_NAMESPACE | FS_SOCKET_NAMESPACE_VERSIONED): Promise<FS_SOCKET_NAMESPACE_VERSIONED>;
+    supports(ns: FS_SYNC_NAMESPACE | FS_SYNC_NAMESPACE_VERSIONED): Promise<FS_SYNC_NAMESPACE_VERSIONED>;
+    supports(ns: FS_NAMESPACE | FS_NAMESPACE_VERSIONED): Promise<FS_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
         if (
             ns === CORE_FS_EXT_NAMESPACE ||
@@ -1427,40 +1427,40 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             return CORE_FS_EXT_NAMESPACE_VERSIONED;
         }
         if (
-            ns === FS_PIPE_NAMESPACE ||
-            ns === FS_PIPE_NAMESPACE_VERSIONED
+            ns === "party.openv.filesystem.pipe" ||
+            ns === "party.openv.filesystem.pipe/0.1.0"
         ) {
-            return FS_PIPE_NAMESPACE_VERSIONED;
+            return "party.openv.filesystem.pipe/0.1.0";
         }
         if (
-            ns === FS_VIRTUAL_NAMESPACE ||
-            ns === FS_VIRTUAL_NAMESPACE_VERSIONED
+            ns === "party.openv.filesystem.virtual" ||
+            ns === "party.openv.filesystem.virtual/0.1.0"
         ) {
-            return FS_VIRTUAL_NAMESPACE_VERSIONED;
+            return "party.openv.filesystem.virtual/0.1.0";
         }
         if (
-            ns === FS_READ_NAMESPACE ||
-            ns === FS_READ_NAMESPACE_VERSIONED
+            ns === "party.openv.filesystem.read" ||
+            ns === "party.openv.filesystem.read/0.1.0"
         ) {
-            return FS_READ_NAMESPACE_VERSIONED;
+            return "party.openv.filesystem.read/0.1.0";
         }
         if (
-            ns === FS_WRITE_NAMESPACE ||
-            ns === FS_WRITE_NAMESPACE_VERSIONED
+            ns === "party.openv.filesystem.write" ||
+            ns === "party.openv.filesystem.write/0.1.0"
         ) {
-            return FS_WRITE_NAMESPACE_VERSIONED;
+            return "party.openv.filesystem.write/0.1.0";
         }
         if (
-            ns === FS_SOCKET_NAMESPACE ||
-            ns === FS_SOCKET_NAMESPACE_VERSIONED
+            ns === "party.openv.filesystem.socket" ||
+            ns === "party.openv.filesystem.socket/0.1.0"
         ) {
-            return FS_SOCKET_NAMESPACE_VERSIONED;
+            return "party.openv.filesystem.socket/0.1.0";
         }
         if (
-            ns === FS_NAMESPACE ||
-            ns === FS_NAMESPACE_VERSIONED
+            ns === "party.openv.filesystem" ||
+            ns === "party.openv.filesystem/0.1.0"
         ) {
-            return FS_NAMESPACE_VERSIONED;
+            return "party.openv.filesystem/0.1.0";
         }
         return null;
     }
@@ -1872,27 +1872,27 @@ export class ProcessScopedFS implements
         return this.#system["party.openv.filesystem.socket.recvfrom"](ofd, maxLength);
     }
 
-    async supports(ns: typeof FS_NAMESPACE | typeof FS_NAMESPACE_VERSIONED): Promise<typeof FS_NAMESPACE_VERSIONED>;
-    async supports(ns: typeof FS_READ_NAMESPACE | typeof FS_READ_NAMESPACE_VERSIONED): Promise<typeof FS_READ_NAMESPACE_VERSIONED>;
-    async supports(ns: typeof FS_WRITE_NAMESPACE | typeof FS_WRITE_NAMESPACE_VERSIONED): Promise<typeof FS_WRITE_NAMESPACE_VERSIONED>;
-    async supports(ns: typeof FS_LOCAL_NAMESPACE | typeof FS_LOCAL_NAMESPACE_VERSIONED): Promise<typeof FS_LOCAL_NAMESPACE_VERSIONED>;
-    async supports(ns: typeof FS_SYNC_NAMESPACE | typeof FS_SYNC_NAMESPACE_VERSIONED): Promise<typeof FS_SYNC_NAMESPACE_VERSIONED>;
-    async supports(ns: typeof FS_PIPE_NAMESPACE | typeof FS_PIPE_NAMESPACE_VERSIONED): Promise<typeof FS_PIPE_NAMESPACE_VERSIONED>;
-    async supports(ns: typeof FS_SOCKET_NAMESPACE | typeof FS_SOCKET_NAMESPACE_VERSIONED): Promise<typeof FS_SOCKET_NAMESPACE_VERSIONED>;
+    async supports(ns: FS_NAMESPACE | FS_NAMESPACE_VERSIONED): Promise<FS_NAMESPACE_VERSIONED>;
+    async supports(ns: FS_READ_NAMESPACE | FS_READ_NAMESPACE_VERSIONED): Promise<FS_READ_NAMESPACE_VERSIONED>;
+    async supports(ns: FS_WRITE_NAMESPACE | FS_WRITE_NAMESPACE_VERSIONED): Promise<FS_WRITE_NAMESPACE_VERSIONED>;
+    async supports(ns: FS_LOCAL_NAMESPACE | FS_LOCAL_NAMESPACE_VERSIONED): Promise<FS_LOCAL_NAMESPACE_VERSIONED>;
+    async supports(ns: FS_SYNC_NAMESPACE | FS_SYNC_NAMESPACE_VERSIONED): Promise<FS_SYNC_NAMESPACE_VERSIONED>;
+    async supports(ns: FS_PIPE_NAMESPACE | FS_PIPE_NAMESPACE_VERSIONED): Promise<FS_PIPE_NAMESPACE_VERSIONED>;
+    async supports(ns: FS_SOCKET_NAMESPACE | FS_SOCKET_NAMESPACE_VERSIONED): Promise<FS_SOCKET_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
         switch (ns) {
-            case FS_NAMESPACE:
-            case FS_NAMESPACE_VERSIONED: return FS_NAMESPACE_VERSIONED;
-            case FS_READ_NAMESPACE:
-            case FS_READ_NAMESPACE_VERSIONED: return FS_READ_NAMESPACE_VERSIONED;
-            case FS_WRITE_NAMESPACE:
-            case FS_WRITE_NAMESPACE_VERSIONED: return FS_WRITE_NAMESPACE_VERSIONED;
-            case FS_LOCAL_NAMESPACE:
-            case FS_LOCAL_NAMESPACE_VERSIONED: return FS_LOCAL_NAMESPACE_VERSIONED;
-            case FS_PIPE_NAMESPACE:
-            case FS_PIPE_NAMESPACE_VERSIONED: return FS_PIPE_NAMESPACE_VERSIONED;
-            case FS_SOCKET_NAMESPACE:
-            case FS_SOCKET_NAMESPACE_VERSIONED: return FS_SOCKET_NAMESPACE_VERSIONED;
+            case "party.openv.filesystem":
+            case "party.openv.filesystem/0.1.0": return "party.openv.filesystem/0.1.0";
+            case "party.openv.filesystem.read":
+            case "party.openv.filesystem.read/0.1.0": return "party.openv.filesystem.read/0.1.0";
+            case "party.openv.filesystem.write":
+            case "party.openv.filesystem.write/0.1.0": return "party.openv.filesystem.write/0.1.0";
+            case "party.openv.filesystem.local":
+            case "party.openv.filesystem.local/0.1.0": return "party.openv.filesystem.local/0.1.0";
+            case "party.openv.filesystem.pipe":
+            case "party.openv.filesystem.pipe/0.1.0": return "party.openv.filesystem.pipe/0.1.0";
+            case "party.openv.filesystem.socket":
+            case "party.openv.filesystem.socket/0.1.0": return "party.openv.filesystem.socket/0.1.0";
         }
         return null;
     }

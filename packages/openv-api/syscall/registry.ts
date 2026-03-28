@@ -26,10 +26,10 @@ export type RegistryWatcher<T> = {
     abort: () => Promise<void>;
 };
 
-export const REGISTRY_READ_NAMESPACE = "party.openv.registry.read" as const;
-export const REGISTRY_READ_NAMESPACE_VERSIONED = `${REGISTRY_READ_NAMESPACE}/0.1.0` as const;
-export const REGISTRY_WRITE_NAMESPACE = "party.openv.registry.write" as const;
-export const REGISTRY_WRITE_NAMESPACE_VERSIONED = `${REGISTRY_WRITE_NAMESPACE}/0.1.0` as const;
+export type REGISTRY_READ_NAMESPACE = "party.openv.registry.read";
+export type REGISTRY_READ_NAMESPACE_VERSIONED = "party.openv.registry.read/0.1.0";
+export type REGISTRY_WRITE_NAMESPACE = "party.openv.registry.write";
+export type REGISTRY_WRITE_NAMESPACE_VERSIONED = "party.openv.registry.write/0.1.0";
 
 /**
  * The universal registry read system component.
@@ -49,7 +49,7 @@ export const REGISTRY_WRITE_NAMESPACE_VERSIONED = `${REGISTRY_WRITE_NAMESPACE}/0
  * The registry is similar to the Windows registry in structure and purpose, but has a more limited scope,
  * and makes no assumptions about how the registry is implemented on the backend.
  */
-export interface RegistryReadComponent extends SystemComponent<typeof REGISTRY_READ_NAMESPACE_VERSIONED, typeof REGISTRY_READ_NAMESPACE> {
+export interface RegistryReadComponent extends SystemComponent<REGISTRY_READ_NAMESPACE_VERSIONED, REGISTRY_READ_NAMESPACE> {
    
     /**
      * Reads a named entry from a registry key.
@@ -147,7 +147,7 @@ export interface RegistryReadComponent extends SystemComponent<typeof REGISTRY_R
  * A system component for writing to the registry.
  * This namespace allows writing values to the system registry for configuration and other purposes.
  */
-export interface RegistryWriteComponent extends SystemComponent<typeof REGISTRY_WRITE_NAMESPACE_VERSIONED, typeof REGISTRY_WRITE_NAMESPACE> {
+export interface RegistryWriteComponent extends SystemComponent<REGISTRY_WRITE_NAMESPACE_VERSIONED, REGISTRY_WRITE_NAMESPACE> {
     /**
      * Writes a value to a specific registry entry.
      * @param key The key to write to, specified as a path string (e.g. "/System/Boot")

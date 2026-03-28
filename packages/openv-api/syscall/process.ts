@@ -1,21 +1,21 @@
 import type { SystemComponent } from "./mod.ts";
 import type { SpawnStdioResult, StdioOption } from "./fs.ts";
 
-export const PROCESS_NAMESPACE = "party.openv.process" as const;
-export const PROCESS_NAMESPACE_VERSIONED = `${PROCESS_NAMESPACE}/0.1.0` as const;
-export const PROCESS_LOCAL_NAMESPACE = `${PROCESS_NAMESPACE}.local` as const;
-export const PROCESS_LOCAL_NAMESPACE_VERSIONED = `${PROCESS_LOCAL_NAMESPACE}/0.1.0` as const;
+export type PROCESS_NAMESPACE = "party.openv.process";
+export type PROCESS_NAMESPACE_VERSIONED = "party.openv.process/0.1.0";
+export type PROCESS_LOCAL_NAMESPACE = "party.openv.process.local";
+export type PROCESS_LOCAL_NAMESPACE_VERSIONED = "party.openv.process.local/0.1.0";
 
 /**
  * This signal is emitted when a process is going to exit gracefully. The process manager will send this signal authored by a child process to its parent process when the `party.openv.process.local.exit` syscall is called.
  * When sent to pid 0, this will free any calls to `party.openv.process.wait` that are waiting on the exiting process, but will not tell the system to kill the process. 
  */
-export const PROCESS_SIGNAL_NOTIFYEXIT = "party.openv.process.signals.notifyexit" as const;
+export type PROCESS_SIGNAL_NOTIFYEXIT = "party.openv.process.signals.notifyexit";
 
 /**
  * This signal is sent to a process to request that it terminates gracefully. The process can choose how to respond to this signal, but it is expected to exit if the sender has the correct privileges.
  */
-export const PROCESS_SIGNAL_QUIT = "party.openv.process.signals.quit" as const;
+export type PROCESS_SIGNAL_QUIT = "party.openv.process.signals.quit";
 
 export interface ProcessExecutorInfo {
     id: string;
@@ -45,7 +45,7 @@ export interface ProcessSpawnOptions {
 /**
  * Universal process management component, that does not rely on actually being called in a process.
  */
-export interface ProcessComponent extends SystemComponent<typeof PROCESS_NAMESPACE_VERSIONED, typeof PROCESS_NAMESPACE> {
+export interface ProcessComponent extends SystemComponent<PROCESS_NAMESPACE_VERSIONED, PROCESS_NAMESPACE> {
     /**
      * Spawns a new process, with different tree behavior depending on the environment it is called in.
      * @param command The absolute path to the executable to run
@@ -102,7 +102,7 @@ export interface ProcessComponent extends SystemComponent<typeof PROCESS_NAMESPA
      * @param pid The process ID of the target process. Logically, pid 0 is the system itself, and should be able to receive signals from any process.
      * @param signal The name of the signal to send. The process component defines standard signals for compatibility, but users and developers are free to expand and include custom signals at will.
      */
-    [`party.openv.process.signal`](pid: number, signal: typeof PROCESS_SIGNAL_QUIT | typeof PROCESS_SIGNAL_NOTIFYEXIT | string): Promise<void>;
+    [`party.openv.process.signal`](pid: number, signal: PROCESS_SIGNAL_QUIT | PROCESS_SIGNAL_NOTIFYEXIT | string): Promise<void>;
 
     /**
      * Wait for a process to exit. This will return the exit code of the process, or null if the process was forcibly killed.
@@ -172,7 +172,7 @@ export interface ProcessComponent extends SystemComponent<typeof PROCESS_NAMESPA
 /**
  * A system component for process-local operations. This component is only available to the process itself, and is not accessible by other processes.
  */
-export interface ProcessLocalComponent extends SystemComponent<typeof PROCESS_LOCAL_NAMESPACE_VERSIONED, typeof PROCESS_LOCAL_NAMESPACE> {
+export interface ProcessLocalComponent extends SystemComponent<PROCESS_LOCAL_NAMESPACE_VERSIONED, PROCESS_LOCAL_NAMESPACE> {
     /**
      * Exits the current process with the given exit code.
      */
