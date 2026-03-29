@@ -1,0 +1,18 @@
+{
+  "name": "party.openv.api.registry",
+  "version": "0.1.0-1",
+  "description": "Registry API wrapper for OpEnv.",
+  "license": "MIT",
+  "platform": "openv",
+  "packager": "Endercass <contact@endercass.me>",
+  "builddate": 0,
+  "urls": {
+    "homepage": "https://openv.party",
+    "git": "https://github.com/openv-project/openv"
+  },
+  "depend": [
+    "party.openv.api",
+    "party.openv.registry"
+  ],
+  "upk-schema": "1"
+}

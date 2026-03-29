@@ -1,4 +1,4 @@
-import type { FileSystemCoreComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, ProcessComponent } from "@openv-project/openv-api";
+import type { FileSystemCoreComponent, FileSystemIoctlComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, ProcessComponent } from "@openv-project/openv-api";
 import { CoreFSExt, CoreProcessExt, CoreSystemLinkPeer, createPostMessageTransport, ProcessScopedFS, ProcessScopedProcess, ProcessSpawnContext } from "../../mod.ts";
 
 export type ProcessEnvBuilder = (ctx: ProcessSpawnContext) => Promise<Record<string, Function>>;
@@ -9,7 +9,7 @@ export interface WebExecutorRegistrationOptions {
 }
 
 export async function registerWebExecutor(
-    system: FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemReadWriteComponent & FileSystemPipeComponent & CoreFSExt & ProcessComponent & CoreProcessExt,
+    system: FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemReadWriteComponent & FileSystemPipeComponent & FileSystemIoctlComponent & CoreFSExt & ProcessComponent & CoreProcessExt,
     buildEnv: ProcessEnvBuilder,
     options?: WebExecutorRegistrationOptions,
 ): Promise<void> {

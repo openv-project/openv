@@ -61,6 +61,10 @@ export type FS_PIPE_NAMESPACE = "party.openv.filesystem.pipe";
 export type FS_PIPE_NAMESPACE_VERSIONED = "party.openv.filesystem.pipe/0.1.0";
 export type FS_SOCKET_NAMESPACE = "party.openv.filesystem.socket";
 export type FS_SOCKET_NAMESPACE_VERSIONED = "party.openv.filesystem.socket/0.1.0";
+export type FS_IOCTL_NAMESPACE = "party.openv.filesystem.ioctl";
+export type FS_IOCTL_NAMESPACE_VERSIONED = "party.openv.filesystem.ioctl/0.1.0";
+export type FS_DEVFS_NAMESPACE = "party.openv.filesystem.devfs";
+export type FS_DEVFS_NAMESPACE_VERSIONED = "party.openv.filesystem.devfs/0.1.0";
 
 export type FileSystemSocketType = "stream" | "dgram";
 
@@ -195,6 +199,44 @@ export interface FileSystemSocketComponent extends SystemComponent<FS_SOCKET_NAM
     ["party.openv.filesystem.socket.recvfrom"](fd: number, maxLength: number): Promise<{ data: Uint8Array; address: SocketAddress | null }>;
 }
 
+/**
+ * Ioctl-like operations on open files.
+ */
+export interface FileSystemIoctlComponent extends SystemComponent<FS_IOCTL_NAMESPACE_VERSIONED, FS_IOCTL_NAMESPACE> {
+    ["party.openv.filesystem.ioctl.ioctl"](fd: number, request: string, argument?: PlainParameter): Promise<PlainParameter>;
+}
+
+export interface CharacterDeviceInfo {
+    type: "character";
+    mode?: FileMode;
+    uid?: number;
+    gid?: number;
+}
+
+export interface CharacterDeviceHandlers {
+    open?: (ofd: number, flags: OpenFlags, mode: FileMode) => Promise<void>;
+    close?: (ofd: number) => Promise<void>;
+    read?: (ofd: number, length: number, position?: number) => Promise<Uint8Array>;
+    write?: (ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null) => Promise<number>;
+    ioctl?: (ofd: number, request: string, argument?: PlainParameter) => Promise<PlainParameter>;
+}
+
+export type CharacterDeviceRegistration = CharacterDeviceInfo & CharacterDeviceHandlers;
+
+/**
+ * Device filesystem component used to register and manage device files.
+ */
+export interface FileSystemDevFsComponent extends SystemComponent<FS_DEVFS_NAMESPACE_VERSIONED, FS_DEVFS_NAMESPACE> {
+    ["party.openv.filesystem.devfs.register"](path: string, device: CharacterDeviceInfo): Promise<void>;
+    ["party.openv.filesystem.devfs.unregister"](path: string): Promise<void>;
+    ["party.openv.filesystem.devfs.list"](): Promise<string[]>;
+    ["party.openv.filesystem.devfs.onopen"](path: string, handler: (ofd: number, flags: OpenFlags, mode: FileMode) => Promise<void>): Promise<void>;
+    ["party.openv.filesystem.devfs.onclose"](path: string, handler: (ofd: number) => Promise<void>): Promise<void>;
+    ["party.openv.filesystem.devfs.onread"](path: string, handler: (ofd: number, length: number, position?: number) => Promise<Uint8Array>): Promise<void>;
+    ["party.openv.filesystem.devfs.onwrite"](path: string, handler: (ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null) => Promise<number>): Promise<void>;
+    ["party.openv.filesystem.devfs.onioctl"](path: string, handler: (ofd: number, request: string, argument?: PlainParameter) => Promise<PlainParameter>): Promise<void>;
+}
+
 export interface FileSystemVirtualComponent extends SystemComponent<FS_VIRTUAL_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE> {
     ["party.openv.filesystem.virtual.create"](id: string): Promise<void>;
     ["party.openv.filesystem.virtual.destroy"](id: string): Promise<void>;
@@ -236,6 +278,7 @@ export interface FileSystemVirtualComponent extends SystemComponent<FS_VIRTUAL_N
         events: AsyncIterable<FileSystemEvent>;
         abort: () => Promise<void>;
     }>): Promise<void>;
+    ["party.openv.filesystem.virtual.onioctl"](id: string, handler: (ofd: number, request: string, argument?: PlainParameter) => Promise<PlainParameter>): Promise<void>;
     ["party.openv.filesystem.virtual.onsync"](id: string, handler: (ofd: number) => Promise<void>): Promise<void>;
 }
 

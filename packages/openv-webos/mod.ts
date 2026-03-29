@@ -1,5 +1,6 @@
 import {
   FileSystemCoreComponent,
+  FileSystemIoctlComponent,
   FileSystemPipeComponent,
   FileSystemReadOnlyComponent,
   FileSystemReadWriteComponent,
@@ -44,6 +45,7 @@ const openv = new ClientOpEnv<
     FileSystemReadOnlyComponent &
     FileSystemReadWriteComponent &
     FileSystemPipeComponent &
+    FileSystemIoctlComponent &
     CoreFSExt &
     ProcessComponent &
     CoreProcessExt

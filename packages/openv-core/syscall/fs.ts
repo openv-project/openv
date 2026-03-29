@@ -1,4 +1,4 @@
-import type { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemSocketComponent, FileSystemSocketType, FileSystemSyncComponent, FileSystemVirtualComponent, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_SOCKET_NAMESPACE, FS_SOCKET_NAMESPACE_VERSIONED, FS_SYNC_NAMESPACE, FS_SYNC_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, PlainParameter, ProcessComponent, SocketAddress, SystemComponent } from "@openv-project/openv-api"
+import type { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemIoctlComponent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemSocketComponent, FileSystemSocketType, FileSystemSyncComponent, FileSystemVirtualComponent, FS_IOCTL_NAMESPACE, FS_IOCTL_NAMESPACE_VERSIONED, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_SOCKET_NAMESPACE, FS_SOCKET_NAMESPACE_VERSIONED, FS_SYNC_NAMESPACE, FS_SYNC_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, PlainParameter, ProcessComponent, SocketAddress, SystemComponent } from "@openv-project/openv-api"
 import { CoreProcessExt } from "./mod";
 
 type VFS = {
@@ -24,6 +24,7 @@ type VFS = {
         events: AsyncIterable<FileSystemEvent>;
         abort: () => Promise<void>;
     }>;
+    ioctl: (ofd: number, request: string, argument?: PlainParameter) => Promise<PlainParameter>;
     sync: (ofd: number) => Promise<void>;
 };
 
@@ -62,7 +63,15 @@ export interface CoreFSExt extends SystemComponent<typeof CORE_FS_EXT_NAMESPACE_
     ["party.openv.impl.filesystem.createPipeOfd"](bufferSize?: number): Promise<[readOfd: number, writeOfd: number]>;
 }
 
-export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemPipeComponent, FileSystemSocketComponent, FileSystemSyncComponent, CoreFSExt {
+export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemPipeComponent, FileSystemSocketComponent, FileSystemIoctlComponent, FileSystemSyncComponent, CoreFSExt {
+    async ["party.openv.filesystem.ioctl.ioctl"](ofd: number, request: string, argument?: PlainParameter): Promise<PlainParameter> {
+        const entry = this.#ofdTable.get(ofd);
+        if (!entry) throw new Error(`Invalid open file number ${ofd}`);
+        if (!entry.provider || typeof entry.provider.ioctl !== "function") {
+            throw new Error(`Open file number ${ofd} does not support ioctl.`);
+        }
+        return entry.provider.ioctl(ofd, request, argument);
+    }
     async ["party.openv.filesystem.sync.sync"](ofd: number): Promise<void> {
         const entry = this.#ofdTable.get(ofd);
         if (!entry) {
@@ -791,6 +800,13 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             }
         }
 
+        for (const mountPath of this.#mountTable.keys()) {
+            if (mountPath === "/") continue;
+            if (parentOf(mountPath) === normalized) {
+                merged.add(nameOf(mountPath));
+            }
+        }
+
         return Array.from(merged.values());
     }
 
@@ -906,6 +922,10 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     async ["party.openv.filesystem.virtual.onwatch"](id: string, handler: (path: string, options?: { recursive?: boolean; }) => Promise<{ events: AsyncIterable<FileSystemEvent>; abort: () => Promise<void>; }>): Promise<void> {
         const vfs = this.#getVfs(id);
         vfs.watch = handler;
+    }
+    async ["party.openv.filesystem.virtual.onioctl"](id: string, handler: (ofd: number, request: string, argument?: PlainParameter) => Promise<PlainParameter>): Promise<void> {
+        const vfs = this.#getVfs(id);
+        vfs.ioctl = handler;
     }
     async ["party.openv.filesystem.virtual.onopen"](id: string, handler: (path: string, fd: number, flags: OpenFlags, mode: FileMode) => Promise<void>): Promise<void> {
         const vfs = this.#getVfs(id);
@@ -1604,6 +1624,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     supports(ns: FS_READ_NAMESPACE | FS_READ_NAMESPACE_VERSIONED): Promise<FS_READ_NAMESPACE_VERSIONED>;
     supports(ns: FS_WRITE_NAMESPACE | FS_WRITE_NAMESPACE_VERSIONED): Promise<FS_WRITE_NAMESPACE_VERSIONED>;
     supports(ns: FS_SOCKET_NAMESPACE | FS_SOCKET_NAMESPACE_VERSIONED): Promise<FS_SOCKET_NAMESPACE_VERSIONED>;
+    supports(ns: FS_IOCTL_NAMESPACE | FS_IOCTL_NAMESPACE_VERSIONED): Promise<FS_IOCTL_NAMESPACE_VERSIONED>;
     supports(ns: FS_SYNC_NAMESPACE | FS_SYNC_NAMESPACE_VERSIONED): Promise<FS_SYNC_NAMESPACE_VERSIONED>;
     supports(ns: FS_NAMESPACE | FS_NAMESPACE_VERSIONED): Promise<FS_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
@@ -1642,6 +1663,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             ns === "party.openv.filesystem.socket/0.1.0"
         ) {
             return "party.openv.filesystem.socket/0.1.0";
+        }
+        if (
+            ns === "party.openv.filesystem.ioctl" ||
+            ns === "party.openv.filesystem.ioctl/0.1.0"
+        ) {
+            return "party.openv.filesystem.ioctl/0.1.0";
         }
         if (
             ns === "party.openv.filesystem" ||
@@ -1749,6 +1776,7 @@ export class ProcessScopedFS implements
     FileSystemReadWriteComponent,
     FileSystemPipeComponent,
     FileSystemSocketComponent,
+    FileSystemIoctlComponent,
     FileSystemSyncComponent,
     FileSystemLocalComponent {
     #system: FileSystemCoreComponent &
@@ -1756,6 +1784,7 @@ export class ProcessScopedFS implements
         FileSystemReadWriteComponent &
         FileSystemPipeComponent &
         FileSystemSocketComponent &
+        FileSystemIoctlComponent &
         FileSystemSyncComponent &
         CoreFSExt &
         ProcessComponent &
@@ -1771,6 +1800,7 @@ export class ProcessScopedFS implements
         FileSystemReadWriteComponent &
         FileSystemPipeComponent &
         FileSystemSocketComponent &
+        FileSystemIoctlComponent &
         FileSystemSyncComponent &
         CoreFSExt &
         ProcessComponent &
@@ -1785,6 +1815,13 @@ export class ProcessScopedFS implements
             throw new Error(`Invalid file descriptor ${ofd}`);
         }
         await this.#system["party.openv.filesystem.sync.sync"](ofdGlobal);
+    }
+    async ["party.openv.filesystem.ioctl.ioctl"](fd: number, request: string, argument?: PlainParameter): Promise<PlainParameter> {
+        const ofdGlobal = this.#fdToOfd.get(fd);
+        if (ofdGlobal === undefined) {
+            throw new Error(`Invalid file descriptor ${fd}`);
+        }
+        return this.#system["party.openv.filesystem.ioctl.ioctl"](ofdGlobal, request, argument);
     }
 
     async #getUid(): Promise<number> {
@@ -2124,6 +2161,7 @@ export class ProcessScopedFS implements
     async supports(ns: FS_SYNC_NAMESPACE | FS_SYNC_NAMESPACE_VERSIONED): Promise<FS_SYNC_NAMESPACE_VERSIONED>;
     async supports(ns: FS_PIPE_NAMESPACE | FS_PIPE_NAMESPACE_VERSIONED): Promise<FS_PIPE_NAMESPACE_VERSIONED>;
     async supports(ns: FS_SOCKET_NAMESPACE | FS_SOCKET_NAMESPACE_VERSIONED): Promise<FS_SOCKET_NAMESPACE_VERSIONED>;
+    async supports(ns: FS_IOCTL_NAMESPACE | FS_IOCTL_NAMESPACE_VERSIONED): Promise<FS_IOCTL_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
         switch (ns) {
             case "party.openv.filesystem":
@@ -2138,6 +2176,8 @@ export class ProcessScopedFS implements
             case "party.openv.filesystem.pipe/0.1.0": return "party.openv.filesystem.pipe/0.1.0";
             case "party.openv.filesystem.socket":
             case "party.openv.filesystem.socket/0.1.0": return "party.openv.filesystem.socket/0.1.0";
+            case "party.openv.filesystem.ioctl":
+            case "party.openv.filesystem.ioctl/0.1.0": return "party.openv.filesystem.ioctl/0.1.0";
         }
         return null;
     }

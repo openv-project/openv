@@ -31,6 +31,9 @@ type PackageConfig = {
     typesOnly?: boolean;
     buildUpk?: boolean;
     manifestPath?: string;
+    bootstrapSelectable?: boolean;
+    bootstrapDefaultSelected?: boolean;
+    bootstrapLabel?: string;
 };
 
 const PACKAGES: PackageConfig[] = [
@@ -39,7 +42,10 @@ const PACKAGES: PackageConfig[] = [
         installPath: "/lib/openv/openv-core", 
         distName: "openv-core",
         buildUpk: true,
-        manifestPath: "packages/openv-core/.manifest"
+        manifestPath: "packages/openv-core/.manifest",
+        bootstrapSelectable: true,
+        bootstrapDefaultSelected: true,
+        bootstrapLabel: "Base system"
     },
     { 
         src: "packages/openv-api", 
@@ -52,38 +58,70 @@ const PACKAGES: PackageConfig[] = [
         installPath: "/lib/openv/libupk",
         distName: "party.openv.libupk",
         buildUpk: true,
-        manifestPath: "packages/party.openv.libupk/.manifest"
+        manifestPath: "packages/party.openv.libupk/.manifest",
+        bootstrapSelectable: true,
+        bootstrapDefaultSelected: true,
+        bootstrapLabel: "UPK API"
     },
     { 
-        src: "packages/party.openv.api.fs", 
+        src: "packages/party.openv.api.filesystem", 
         installPath: "/lib/openv/api/fs", 
-        distName: "party.openv.api.fs" 
+        distName: "party.openv.api.filesystem",
+        buildUpk: true,
+        manifestPath: "packages/party.openv.api.filesystem/.manifest",
+        bootstrapSelectable: true,
+        bootstrapDefaultSelected: false,
+        bootstrapLabel: "Filesystem API"
     },
     { 
         src: "packages/party.openv.api.registry", 
         installPath: "/lib/openv/api/registry", 
-        distName: "party.openv.api.registry" 
+        distName: "party.openv.api.registry",
+        buildUpk: true,
+        manifestPath: "packages/party.openv.api.registry/.manifest",
+        bootstrapSelectable: true,
+        bootstrapDefaultSelected: false,
+        bootstrapLabel: "Registry API"
+    },
+    {
+        src: "packages/party.openv.api.devfs",
+        installPath: "/lib/openv/api/devfs",
+        distName: "party.openv.api.devfs",
+        buildUpk: true,
+        manifestPath: "packages/party.openv.api.devfs/.manifest",
+        bootstrapSelectable: true,
+        bootstrapDefaultSelected: false,
+        bootstrapLabel: "DevFS API"
     },
     { 
         src: "packages/openv-webos", 
         installPath: "/srv/openv-webos", 
         distName: "openv-webos",
         buildUpk: true,
-        manifestPath: "packages/openv-webos/.manifest"
+        manifestPath: "packages/openv-webos/.manifest",
+        bootstrapSelectable: true,
+        bootstrapDefaultSelected: true,
+        bootstrapLabel: "Frontend"
     },
     {
         src: "node_modules/fflate/esm",
         installPath: "/lib/fflate",
         distName: "fflate",
         buildUpk: true,
-        manifestPath: "packages/fflate/.manifest"
+        manifestPath: "packages/fflate/.manifest",
+        bootstrapSelectable: true,
+        bootstrapDefaultSelected: true,
+        bootstrapLabel: "fflate"
     },
     {
         src: "node_modules/nanotar/dist",
         installPath: "/lib/nanotar",
         distName: "nanotar",
         buildUpk: true,
-        manifestPath: "packages/nanotar/.manifest"
+        manifestPath: "packages/nanotar/.manifest",
+        bootstrapSelectable: true,
+        bootstrapDefaultSelected: true,
+        bootstrapLabel: "nanotar"
     },
 ];
 
@@ -401,6 +439,16 @@ for (const pkg of PACKAGES) {
         await createUpkPackage(pkg, tempBuild, skelMetaMap);
     }
 }
+
+const bootstrapPackages = PACKAGES
+    .filter((pkg) => pkg.buildUpk && pkg.bootstrapSelectable !== false)
+    .map((pkg) => ({
+        path: `/packages/${pkg.distName}.tar.gz`,
+        label: pkg.bootstrapLabel ?? pkg.distName,
+        defaultSelected: pkg.bootstrapDefaultSelected ?? false,
+    }));
+await writeFile(join(PACKAGES_DIR, "bootstrap-packages.json"), `${JSON.stringify(bootstrapPackages, null, 2)}\n`, "utf8");
+console.log(`  bootstrap-packages.json (${bootstrapPackages.length} entries)`);
 
 console.log("\nbundling sw.ts...");
 await esbuild.build({

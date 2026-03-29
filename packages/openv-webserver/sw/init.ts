@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 import {
-    CoreFS, CoreOpEnv, CoreProcess, CoreRegistry, OPFS, TmpFs,
+    CoreFS, CoreOpEnv, CoreProcess, CoreRegistry, DevFS, OPFS, TmpFs,
 } from "@openv-project/openv-core";
 import { CoreScriptEvaluator } from "@openv-project/openv-core/syscall/script";
 import type { PlainParameter, RegistryValue } from "@openv-project/openv-api";
@@ -14,6 +14,7 @@ export const coreRegistry = new CoreRegistry();
 export const coreFs = new CoreFS();
 export const coreProcess = new CoreProcess();
 export const coreScriptEvaluator = new CoreScriptEvaluator();
+export const devFs = new DevFS();
 
 export const FS_FSTAB_KEY = "/system/party/openv/filesystem/fstab" as const;
 export const REGTAB_KEY = "/system/party/openv/registry/regtab" as const;
@@ -25,6 +26,9 @@ const DEFAULT_FS_MOUNT_EXTRA = "opfs" as const;
 const TMP_FS_MOUNT_ID = "tmp" as const;
 const TMP_FS_MOUNT_IMPL = "party.openv.impl.tmpfs" as const;
 const TMP_FS_MOUNT_PATH = "/tmp" as const;
+const DEV_FS_MOUNT_ID = "dev" as const;
+const DEV_FS_MOUNT_IMPL = "party.openv.impl.devfs" as const;
+const DEV_FS_MOUNT_PATH = "/dev" as const;
 const DEFAULT_REGTAB_ID = "system" as const;
 const DEFAULT_REGTAB_STORE_DIR = "/var/lib/registry/system" as const;
 
@@ -58,6 +62,7 @@ function fsFstabDefaults(rootMount: RootMountConfig): [string, string, string][]
     return [
         [FS_FSTAB_KEY, DEFAULT_FS_MOUNT_ID, JSON.stringify(rootTuple)],
         [FS_FSTAB_KEY, TMP_FS_MOUNT_ID, JSON.stringify([TMP_FS_MOUNT_IMPL, TMP_FS_MOUNT_PATH])],
+        [FS_FSTAB_KEY, DEV_FS_MOUNT_ID, JSON.stringify([DEV_FS_MOUNT_IMPL, DEV_FS_MOUNT_PATH])],
     ];
 }
 
@@ -73,6 +78,7 @@ const REGTAB_DEFAULTS: [string, string, RegistryValue][] = [
 
 openv.installSystemComponent(coreRegistry);
 openv.installSystemComponent(coreFs);
+openv.installSystemComponent(devFs);
 openv.installSystemComponent(coreProcess);
 openv.installSystemComponent(coreScriptEvaluator);
 coreProcess.setFsExt(coreFs);
@@ -93,6 +99,7 @@ export async function ensureInitialized(): Promise<void> {
 
         await new TmpFs().register(coreFs);
         await new OPFS().register(coreFs);
+        await devFs.register(coreFs);
         await coreFs["party.openv.filesystem.virtual.mount"](rootMount.impl, rootMount.path, rootMount.extra);
 
         await hydrateSystemRegistryFromIdb(coreRegistry, coreFs);

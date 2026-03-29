@@ -3,18 +3,12 @@ import { OpEnv } from "@openv-project/openv-api";
 import { ClientOpEnv, createPostMessageTransport } from "@openv-project/openv-core";
 
 const BOOTSTRAP_KEY = "/system/party/openv/bootstrap" as const;
-const BASE_PACKAGE_PATH = "/packages/openv-core.tar.gz" as const;
-const UPK_PACKAGE_PATH = "/packages/party.openv.libupk.tar.gz" as const;
-const FRONTEND_PACKAGE_PATH = "/packages/openv-webos.tar.gz" as const;
-const FFLATE_PACKAGE_PATH = "/packages/fflate.tar.gz" as const;
-const NANOTAR_PACKAGE_PATH = "/packages/nanotar.tar.gz" as const;
+const BOOTSTRAP_PACKAGE_LIST_PATH = "/packages/bootstrap-packages.json" as const;
 
-type InstallerSelection = {
-    installBase: boolean;
-    installUpk: boolean;
-    installFrontend: boolean;
-    installFflate: boolean;
-    installNanotar: boolean;
+type BootstrapPackageEntry = {
+    path: string;
+    label: string;
+    defaultSelected: boolean;
 };
 
 function renderStatus(message: string, isError = false): void {
@@ -49,7 +43,19 @@ function showReloadPrompt(): void {
     }
 }
 
-function renderInstallerScreen(onInstall: (selection: InstallerSelection) => Promise<void>): void {
+function renderInstallerScreen(
+    packages: BootstrapPackageEntry[],
+    onInstall: (selectedPackagePaths: string[]) => Promise<void>,
+): void {
+    const safePackages = Array.isArray(packages) ? packages : [];
+    const packageRows = safePackages
+        .map((pkg, index) => {
+            const id = `pkg-${index}`;
+            const checked = pkg.defaultSelected ? " checked" : "";
+            return `<label><input id="${id}" type="checkbox" data-path="${pkg.path}"${checked} /> ${pkg.label} (${pkg.path})</label>`;
+        })
+        .join("<br />");
+
     document.body.innerHTML = `
         <main>
             <h1>openv installer</h1>
@@ -57,12 +63,12 @@ function renderInstallerScreen(onInstall: (selection: InstallerSelection) => Pro
             <p id="status"></p>
             <p>Progress: <span id="progress">0/0 (0%)</span></p>
             <div>
-                <label><input id="pkg-base" type="checkbox" checked /> Base system (${BASE_PACKAGE_PATH})</label><br />
-                <label><input id="pkg-upk" type="checkbox" checked /> UPK API (${UPK_PACKAGE_PATH})</label><br />
-                <label><input id="pkg-frontend" type="checkbox" checked /> Frontend (${FRONTEND_PACKAGE_PATH})</label><br />
-                <label><input id="pkg-fflate" type="checkbox" checked /> fflate (${FFLATE_PACKAGE_PATH})</label><br />
-                <label><input id="pkg-nanotar" type="checkbox" checked /> nanotar (${NANOTAR_PACKAGE_PATH})</label>
+                ${packageRows || "<em>No packages available.</em>"}
             </div>
+            <p>
+                <button id="select-all-btn" type="button">Select All</button>
+                <button id="deselect-all-btn" type="button">Deselect All</button>
+            </p>
             <p><button id="install-btn">Install Selected</button></p>
             <p><textarea id="install-log" rows="16" cols="100" readonly></textarea></p>
             <div id="post-install-actions"></div>
@@ -70,22 +76,27 @@ function renderInstallerScreen(onInstall: (selection: InstallerSelection) => Pro
     `;
 
     const installBtn = document.getElementById("install-btn") as HTMLButtonElement;
-    const base = document.getElementById("pkg-base") as HTMLInputElement;
-    const upk = document.getElementById("pkg-upk") as HTMLInputElement;
-    const frontend = document.getElementById("pkg-frontend") as HTMLInputElement;
-    const fflate = document.getElementById("pkg-fflate") as HTMLInputElement;
-    const nanotar = document.getElementById("pkg-nanotar") as HTMLInputElement;
+    const selectAllBtn = document.getElementById("select-all-btn") as HTMLButtonElement | null;
+    const deselectAllBtn = document.getElementById("deselect-all-btn") as HTMLButtonElement | null;
+    const packageInputs = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="checkbox"][data-path]'));
 
     setProgress(0, 0);
 
+    if (selectAllBtn) {
+        selectAllBtn.onclick = () => {
+            for (const input of packageInputs) input.checked = true;
+        };
+    }
+
+    if (deselectAllBtn) {
+        deselectAllBtn.onclick = () => {
+            for (const input of packageInputs) input.checked = false;
+        };
+    }
+
     installBtn.onclick = () => {
-        void onInstall({
-            installBase: base.checked,
-            installUpk: upk.checked,
-            installFrontend: frontend.checked,
-            installFflate: fflate.checked,
-            installNanotar: nanotar.checked,
-        });
+        const selected = packageInputs.filter((input) => input.checked).map((input) => input.dataset.path!).filter(Boolean);
+        void onInstall(selected);
     };
 }
 
@@ -194,7 +205,7 @@ async function ensureDir(system: any, path: string): Promise<void> {
     }
 }
 
-async function installSelected(openv: OpEnv<any>, selection: InstallerSelection): Promise<void> {
+async function installSelected(openv: OpEnv<any>, selectedPackagePaths: string[]): Promise<void> {
     const system = openv.system;
     appendLog("Preparing installation.");
     await ensureDir(system, "/var/lib/upk");
@@ -212,12 +223,7 @@ async function installSelected(openv: OpEnv<any>, selection: InstallerSelection)
         inMemoryDb: false,
     });
 
-    const packageQueue: string[] = [];
-    if (selection.installBase) packageQueue.push(BASE_PACKAGE_PATH);
-    if (selection.installUpk) packageQueue.push(UPK_PACKAGE_PATH);
-    if (selection.installFrontend) packageQueue.push(FRONTEND_PACKAGE_PATH);
-    if (selection.installFflate) packageQueue.push(FFLATE_PACKAGE_PATH);
-    if (selection.installNanotar) packageQueue.push(NANOTAR_PACKAGE_PATH);
+    const packageQueue = selectedPackagePaths.slice();
     if (packageQueue.length === 0) {
         throw new Error("No package selected.");
     }
@@ -278,12 +284,41 @@ async function main(): Promise<void> {
     const completedRaw = await system["party.openv.registry.read.readEntry"](BOOTSTRAP_KEY, "completed");
     const completed = completedRaw === true;
 
-    const startInstall = async (selection: InstallerSelection) => {
+    let bootstrapPackages: BootstrapPackageEntry[] = [];
+    try {
+        const pkgListRes = await fetch(BOOTSTRAP_PACKAGE_LIST_PATH);
+        if (!pkgListRes.ok) {
+            throw new Error(`Failed to fetch package list (${pkgListRes.status})`);
+        }
+        const decoded = await pkgListRes.json() as unknown;
+        if (!Array.isArray(decoded)) {
+            throw new Error("Invalid bootstrap package list payload.");
+        }
+        bootstrapPackages = decoded
+            .filter((entry): entry is BootstrapPackageEntry =>
+                !!entry &&
+                typeof entry === "object" &&
+                typeof (entry as any).path === "string" &&
+                typeof (entry as any).label === "string" &&
+                typeof (entry as any).defaultSelected === "boolean")
+            .map((entry) => ({
+                path: entry.path,
+                label: entry.label,
+                defaultSelected: entry.defaultSelected,
+            }));
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        appendLog(`Failed to load bootstrap package list: ${message}`);
+        renderStatus(`Failed to load bootstrap package list: ${message}`, true);
+        throw error;
+    }
+
+    const startInstall = async (selectedPackagePaths: string[]) => {
         try {
             renderStatus("Starting installation...");
             const postInstallActions = document.getElementById("post-install-actions");
             if (postInstallActions) postInstallActions.innerHTML = "";
-            await installSelected(openv, selection);
+            await installSelected(openv, selectedPackagePaths);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             appendLog(`Install failed: ${message}`);
@@ -292,12 +327,12 @@ async function main(): Promise<void> {
     };
 
     if (!completed) {
-        renderInstallerScreen(startInstall);
+        renderInstallerScreen(bootstrapPackages, startInstall);
         return;
     }
 
     renderWarningPrompt(() => {
-        renderInstallerScreen(startInstall);
+        renderInstallerScreen(bootstrapPackages, startInstall);
     });
 }
 
