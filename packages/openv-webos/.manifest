@@ -1,0 +1,20 @@
+{
+    "name": "party.openv.webos",
+    "version": "0.1.0-1",
+    "description": "OpEnv's web userspace.",
+    "license": "MIT",
+    "platform": "openv",
+    "packager": "Endercass <contact@endercass.me>",
+    "builddate": 0,
+    "urls": {
+        "homepage": "https://openv.party",
+        "git": "https://github.com/openv-project/openv"
+    },
+    "depend": [
+        "party.openv.api", 
+        "party.openv.filesystem", 
+        "party.openv.registry", 
+        "party.openv.process"
+    ],
+    "upk-schema": "1"
+}

@@ -18,6 +18,7 @@ export let bridgeEnabled = true;
 export let bridgeCacheEnabled = true;
 export let bridgeCacheMaxBytes = BRIDGE_DEFAULT_CACHE_MAX_BYTES;
 export let bridgeCacheValidationMode: BridgeCacheValidationMode = "async";
+export let bridgeWebRootFallback = true;
 export let bridgePaths: [string, string][] = [
     ["/@/", "/"],
     ["/", "/srv/openv-webos"],
@@ -28,6 +29,7 @@ export const BRIDGE_DEFAULTS: [string, string, string | number | boolean][] = [
     [BRIDGE_KEY, "cacheEnabled", true],
     [BRIDGE_KEY, "cacheMaxBytes", BRIDGE_DEFAULT_CACHE_MAX_BYTES],
     [BRIDGE_KEY, "cacheValidationMode", "async"],
+    [BRIDGE_KEY, "webRootFallback", true],
     [BRIDGE_KEY, "paths", JSON.stringify(bridgePaths)],
 ];
 
@@ -74,6 +76,9 @@ export async function applyBridgeConfig(): Promise<void> {
     const validationModeVal = await coreRegistry["party.openv.registry.read.readEntry"](BRIDGE_KEY, "cacheValidationMode");
     bridgeCacheValidationMode = validationModeVal === "strict" ? "strict" : "async";
 
+    const webRootFallbackVal = await coreRegistry["party.openv.registry.read.readEntry"](BRIDGE_KEY, "webRootFallback");
+    bridgeWebRootFallback = webRootFallbackVal !== false;
+
     const pathsRaw = await coreRegistry["party.openv.registry.read.readEntry"](BRIDGE_KEY, "paths");
     try {
         if (pathsRaw) bridgePaths = JSON.parse(pathsRaw as string);
@@ -111,11 +116,12 @@ export function handleFetch(event: FetchEvent): void {
             : `${matchedFsPrefix}/${remainder}`;
         const normalized = "/" + joined.replace(/\/+/g, "/").replace(/^\/+/, "");
 
-        return serveFsPath(normalized, event);
+        const allowFallback = bridgeWebRootFallback && matchedWebPrefix === "/";
+        return serveFsPath(normalized, event, allowFallback ? event.request : undefined);
     })());
 }
 
-async function serveFsPath(fsPath: string, event?: FetchEvent): Promise<Response> {
+async function serveFsPath(fsPath: string, event?: FetchEvent, fallbackRequest?: Request): Promise<Response> {
     try {
         if (bridgeCacheEnabled && bridgeCacheValidationMode === "async") {
             const fastCached = await tryServeCachedFast(fsPath, event);
@@ -147,10 +153,27 @@ async function serveFsPath(fsPath: string, event?: FetchEvent): Promise<Response
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         const status = msg.includes("ENOENT") ? 404 : 500;
-        return new Response(JSON.stringify({ err: msg }), {
+        const fsErrorResponse = new Response(JSON.stringify({ err: msg }), {
             status,
             headers: { "Content-Type": "application/json" }
         });
+
+        if (fallbackRequest && status === 404) {
+            try {
+                const upstream = await fetch(fallbackRequest);
+                if (upstream.ok) {
+                    return upstream;
+                }
+                console.warn(`[bridge] web root fallback returned ${upstream.status} for ${fallbackRequest.url}; keeping fs error response`, {
+                    fsPath,
+                    fsError: msg,
+                });
+            } catch (fallbackErr) {
+                console.warn(`[bridge] web root fallback failed for ${fallbackRequest.url}; keeping fs error response`, fallbackErr);
+            }
+        }
+
+        return fsErrorResponse;
     }
 }
 

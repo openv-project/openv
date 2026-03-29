@@ -10,8 +10,8 @@ const PKG_MAP: Record<string, PackageConfig> = {
     "@openv-project/openv-core": { path: "/lib/openv/openv-core" },
     "@openv-project/api-fs": { path: "/lib/openv/api/fs" },
     "@openv-project/api-registry": { path: "/lib/openv/api/registry" },
-    "@remote-dom/core": { path: "/lib/remote-dom/core", defaultExport: "index.js" },
-    "@remote-dom/polyfill": { path: "/lib/remote-dom/polyfill", defaultExport: "index.js" },
+    "fflate": { path: "/lib/fflate", defaultExport: "index.mjs" },
+    "nanotar": { path: "/lib/nanotar", defaultExport: "index.mjs" },
 };
 
 export const importRewriter: Plugin = {
@@ -29,7 +29,10 @@ export const importRewriter: Plugin = {
             for (const [pkg, config] of Object.entries(PKG_MAP)) {
                 if (args.path.startsWith(pkg + "/")) {
                     const sub = args.path.slice(pkg.length).replace(/\.ts$/, ".js");
-                    const resolved = sub.endsWith(".js") ? sub : sub + ".js";
+                    const resolved =
+                        sub.endsWith(".js") || sub.endsWith(".mjs") || sub.endsWith(".cjs")
+                            ? sub
+                            : sub + ".js";
                     return { path: `/@${config.path}${resolved}`, external: true };
                 }
             }

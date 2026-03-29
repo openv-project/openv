@@ -4,8 +4,8 @@
     "description": "OpEnv web server",
     "license": "MIT",
     "dependencies": {
-        "nanotar": "0.3.0",
         "@openv-project/openv-api": "^0.1.0",
-        "@openv-project/openv-core": "^0.1.0"
+        "@openv-project/openv-core": "^0.1.0",
+        "@openv-project/libupk": "^0.1.0"
     }
 }

@@ -3,9 +3,7 @@ import {
     CoreFS, CoreOpEnv, CoreProcess, CoreRegistry, OPFS, TmpFs,
 } from "@openv-project/openv-core";
 import type { PlainParameter, RegistryValue } from "@openv-project/openv-api";
-import { DEFAULT_PATCH_KEY, UPDATER_KEY, runUpdater } from "./updater.ts";
 import { BRIDGE_DEFAULTS, applyBridgeConfig } from "./bridge.ts";
-import { UPDATER_DEFAULTS } from "./updater.ts";
 import { PEER_FILTER_DEFAULTS, applyPeerFilterConfig } from "./security.ts";
 import { hydrateSystemRegistryFromIdb, startSystemRegistryPersistence, syncSystemRegistryToIdb } from "./system-registry-idb.ts";
 
@@ -18,6 +16,9 @@ export const FS_FSTAB_KEY = "/system/party/openv/filesystem/fstab" as const;
 const DEFAULT_FS_MOUNT_ID = "root" as const;
 const DEFAULT_FS_MOUNT_IMPL = "party.openv.impl.opfs" as const;
 const DEFAULT_FS_MOUNT_PATH = "/" as const;
+const TMP_FS_MOUNT_ID = "tmp" as const;
+const TMP_FS_MOUNT_IMPL = "party.openv.impl.tmpfs" as const;
+const TMP_FS_MOUNT_PATH = "/tmp" as const;
 
 type FsMountTupleEntry = [impl: string, path: string, extra?: PlainParameter];
 type FsMountObjectEntry = {
@@ -28,6 +29,7 @@ type FsMountObjectEntry = {
 
 const FS_FSTAB_DEFAULTS: [string, string, string][] = [
     [FS_FSTAB_KEY, DEFAULT_FS_MOUNT_ID, JSON.stringify([DEFAULT_FS_MOUNT_IMPL, DEFAULT_FS_MOUNT_PATH])],
+    [FS_FSTAB_KEY, TMP_FS_MOUNT_ID, JSON.stringify([TMP_FS_MOUNT_IMPL, TMP_FS_MOUNT_PATH])],
 ];
 
 openv.installSystemComponent(coreRegistry);
@@ -54,7 +56,6 @@ export async function ensureInitialized(): Promise<void> {
         await applyFsMountsFromRegistry();
         await syncSystemRegistryToIdb(coreRegistry);
         await startSystemRegistryPersistence(coreRegistry);
-        await runUpdater();
         await applyBridgeConfig();
         await applyPeerFilterConfig();
 
@@ -105,8 +106,6 @@ async function scaffoldRegistry(): Promise<void> {
     await ensureKey("/system/party/openv/serviceWorker");
     await ensureKey("/system/party/openv/serviceWorker/bridge");
     await ensureKey("/system/party/openv/serviceWorker/peerFilter");
-    await ensureKey(UPDATER_KEY);
-    await ensureKey(DEFAULT_PATCH_KEY);
 
     await ensureKey("/api/party");
     await ensureKey("/api/party/openv");
@@ -136,7 +135,7 @@ async function scaffoldRegistry(): Promise<void> {
         write: 0,
     }));
 
-    for (const [key, entry, value] of [...BRIDGE_DEFAULTS, ...PEER_FILTER_DEFAULTS, ...UPDATER_DEFAULTS, ...FS_FSTAB_DEFAULTS]) {
+    for (const [key, entry, value] of [...BRIDGE_DEFAULTS, ...PEER_FILTER_DEFAULTS, ...FS_FSTAB_DEFAULTS]) {
         await ensureDefault(key, entry, value);
     }
 }

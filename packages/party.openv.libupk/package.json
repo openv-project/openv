@@ -1,0 +1,12 @@
+{
+    "name": "@openv-project/libupk",
+    "version": "0.1.0",
+    "type": "module",
+    "main": "./mod.ts",
+    "dependencies": {
+        "@openv-project/openv-api": "^0.1.0",
+        "fflate": "^0.8.2",
+        "nanotar": "^0.3.0"
+    },
+    "license": "MIT"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "fflate",
+  "version": "0.8.2-1",
+  "description": "High performance (de)compression in an 8kB package",
+  "license": "MIT",
+  "platform": "openv",
+  "packager": "Endercass <contact@endercass.me>",
+  "urls": {
+    "homepage": "https://101arrowz.github.io/fflate/",
+    "git": "https://github.com/101arrowz/fflate.git"
+  },
+  "upk-schema": "1"
+}

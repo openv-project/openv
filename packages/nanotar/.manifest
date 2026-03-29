@@ -1,0 +1,12 @@
+{
+  "name": "nanotar",
+  "version": "0.3.0-1",
+  "description": "Tiny and fast tar utils for any JavaScript runtime!",
+  "license": "MIT",
+  "platform": "openv",
+  "packager": "Endercass <contact@endercass.me>",
+  "urls": {
+    "git": "https://github.com/unjs/nanotar"
+  },
+  "upk-schema": "1"
+}
