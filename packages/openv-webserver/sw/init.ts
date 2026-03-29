@@ -26,6 +26,9 @@ const DEFAULT_FS_MOUNT_EXTRA = "opfs" as const;
 const TMP_FS_MOUNT_ID = "tmp" as const;
 const TMP_FS_MOUNT_IMPL = "party.openv.impl.tmpfs" as const;
 const TMP_FS_MOUNT_PATH = "/tmp" as const;
+const SHM_FS_MOUNT_ID = "shm" as const;
+const SHM_FS_MOUNT_IMPL = "party.openv.impl.tmpfs" as const;
+const SHM_FS_MOUNT_PATH = "/dev/shm" as const;
 const DEV_FS_MOUNT_ID = "dev" as const;
 const DEV_FS_MOUNT_IMPL = "party.openv.impl.devfs" as const;
 const DEV_FS_MOUNT_PATH = "/dev" as const;
@@ -63,6 +66,7 @@ function fsFstabDefaults(rootMount: RootMountConfig): [string, string, string][]
         [FS_FSTAB_KEY, DEFAULT_FS_MOUNT_ID, JSON.stringify(rootTuple)],
         [FS_FSTAB_KEY, TMP_FS_MOUNT_ID, JSON.stringify([TMP_FS_MOUNT_IMPL, TMP_FS_MOUNT_PATH])],
         [FS_FSTAB_KEY, DEV_FS_MOUNT_ID, JSON.stringify([DEV_FS_MOUNT_IMPL, DEV_FS_MOUNT_PATH])],
+        [FS_FSTAB_KEY, SHM_FS_MOUNT_ID, JSON.stringify([SHM_FS_MOUNT_IMPL, SHM_FS_MOUNT_PATH])],
     ];
 }
 

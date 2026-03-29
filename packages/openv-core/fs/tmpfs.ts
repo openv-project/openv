@@ -32,6 +32,10 @@ export class TmpFs {
     #paths = new Map<string, number>();
     #roots = new Set<string>();
 
+    #makeFileBuffer(size: number): Uint8Array {
+        return new Uint8Array(new SharedArrayBuffer(size));
+    }
+
     // Register our vfs implementation with the system.
     async register(system: FileSystemVirtualComponent) {
         system["party.openv.filesystem.virtual.create"](TMPFS_NAMESPACE);
@@ -293,7 +297,7 @@ export class TmpFs {
 
         const node = this.#nodecounter++;
         this.#paths.set(`${mount}\0${path}`, node);
-        this.#data.set(node, new Uint8Array());
+        this.#data.set(node, this.#makeFileBuffer(0));
         this.#stats.set(node, {
             type: "FILE",
             size: 0,
@@ -463,7 +467,7 @@ export class TmpFs {
         // ensure backing buffer is large enough
         const needed = pos + bytesToWrite;
         if (needed > data.length) {
-            const newData = new Uint8Array(needed);
+            const newData = this.#makeFileBuffer(needed);
             newData.set(data, 0);
             this.#data.set(file.node, newData);
             data = newData;
