@@ -427,7 +427,11 @@ export class TmpFs {
 
         const pos = position ?? file.position;
         const bytesToRead = Math.min(length, data.length - pos);
-        const result = data.slice(pos, pos + bytesToRead);
+        const canWrite = file.flags.includes("w") || file.flags.includes("+") || file.flags.includes("a");
+        const readView = data.subarray(pos, pos + bytesToRead);
+        const result = canWrite
+            ? readView
+            : new Uint8Array(readView);
 
         if (position === undefined) {
             file.position += bytesToRead;
