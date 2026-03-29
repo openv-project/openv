@@ -21,6 +21,7 @@ function normalizePath(path: string): string {
 export class TmpFs {
     #nodecounter = 0;
     #data = new Map<number, Uint8Array | string[]>();
+    #symlinks = new Map<number, string>();
     #stats = new Map<number, FsStats<typeof TMPFS_NAMESPACE>>();
     /**
      * This is a temporary in-memory filesystem implementation.
@@ -36,6 +37,12 @@ export class TmpFs {
         system["party.openv.filesystem.virtual.create"](TMPFS_NAMESPACE);
         system["party.openv.filesystem.virtual.onstat"](TMPFS_NAMESPACE,
             async (path: string) => await this.stat(normalizePath(path))
+        );
+        system["party.openv.filesystem.virtual.onlstat"]?.(TMPFS_NAMESPACE,
+            async (path: string) => await this.lstat(normalizePath(path))
+        );
+        system["party.openv.filesystem.virtual.onreadlink"]?.(TMPFS_NAMESPACE,
+            async (path: string) => await this.readlink(normalizePath(path))
         );
         system["party.openv.filesystem.virtual.onreaddir"](TMPFS_NAMESPACE,
             async (path: string) => await this.readdir(normalizePath(path))
@@ -71,6 +78,15 @@ export class TmpFs {
         system["party.openv.filesystem.virtual.onunlink"](TMPFS_NAMESPACE,
             async (path: string) => await this.unlink(normalizePath(path))
         );
+        system["party.openv.filesystem.virtual.onsymlink"]?.(TMPFS_NAMESPACE,
+            async (target: string, path: string, mode?: FileMode) => await this.symlink(target, normalizePath(path), mode)
+        );
+        system["party.openv.filesystem.virtual.onchmod"]?.(TMPFS_NAMESPACE,
+            async (path: string, mode: FileMode) => await this.chmod(normalizePath(path), mode)
+        );
+        system["party.openv.filesystem.virtual.onchown"]?.(TMPFS_NAMESPACE,
+            async (path: string, uid: number, gid: number) => await this.chown(normalizePath(path), uid, gid)
+        );
         system["party.openv.filesystem.virtual.onrename"](TMPFS_NAMESPACE,
             async (oldPath: string, newPath: string) => await this.rename(normalizePath(oldPath), normalizePath(newPath))
         );
@@ -89,11 +105,35 @@ export class TmpFs {
     }
 
     async stat(path: string): Promise<FsStats<typeof TMPFS_NAMESPACE>> {
+        return this.#getStats(path, "stat");
+    }
+
+    async lstat(path: string): Promise<FsStats<typeof TMPFS_NAMESPACE>> {
+        return this.#getStats(path, "lstat");
+    }
+
+    #getStats(path: string, op: "stat" | "lstat"): FsStats<typeof TMPFS_NAMESPACE> {
         const node = this.#paths.get(`${this.closestMountpoint(path)}\0${path}`);
         if (node === undefined) {
-            throw new Error(`ENOENT: no such file or directory, stat '${path}'`);
+            throw new Error(`ENOENT: no such file or directory, ${op} '${path}'`);
         }
         return this.#stats.get(node)!;
+    }
+
+    async readlink(path: string): Promise<string> {
+        const node = this.#paths.get(`${this.closestMountpoint(path)}\0${path}`);
+        if (node === undefined) {
+            throw new Error(`ENOENT: no such file or directory, readlink '${path}'`);
+        }
+        const stats = this.#stats.get(node);
+        if (!stats || stats.type !== "SYMLINK") {
+            throw new Error(`EINVAL: invalid argument, readlink '${path}'`);
+        }
+        const target = this.#symlinks.get(node);
+        if (!target) {
+            throw new Error(`ENOENT: no such file or directory, readlink '${path}'`);
+        }
+        return target;
     }
 
     async readdir(path: string): Promise<string[]> {
@@ -224,6 +264,7 @@ export class TmpFs {
 
         for (const node of nodesToDelete) {
             this.#data.delete(node);
+            this.#symlinks.delete(node);
             this.#stats.delete(node);
         }
     }
@@ -267,6 +308,67 @@ export class TmpFs {
         });
     }
 
+    async symlink(target: string, path: string, mode?: FileMode): Promise<void> {
+        const mount = this.closestMountpoint(path);
+        if (this.#paths.has(`${mount}\0${path}`)) {
+            throw new Error(`EEXIST: file already exists, symlink '${path}'`);
+        }
+        const parentPath = path.split("/").slice(0, -1).join("/") || "/";
+        const parentNode = this.#paths.get(`${mount}\0${parentPath}`);
+        if (parentNode === undefined) {
+            throw new Error(`ENOENT: no such file or directory, symlink '${path}'`);
+        }
+        const parentStats = this.#stats.get(parentNode)!;
+        if (parentStats.type !== "DIRECTORY") {
+            throw new Error(`parent path '${parentPath}' is not a directory.`);
+        }
+        parentStats.mtime = Date.now();
+        const parentData = this.#data.get(parentNode);
+        if (Array.isArray(parentData)) {
+            parentData.push(path.split("/").pop()!);
+        }
+
+        const node = this.#nodecounter++;
+        this.#paths.set(`${mount}\0${path}`, node);
+        this.#symlinks.set(node, target);
+        this.#stats.set(node, {
+            type: "SYMLINK",
+            size: target.length,
+            atime: Date.now(),
+            mtime: Date.now(),
+            ctime: Date.now(),
+            name: path.split("/").pop()!,
+            uid: 0,
+            gid: 0,
+            mode: (mode ?? 0o777) | 0o120000,
+            node: "party.openv.impl.tmpfs"
+        });
+    }
+
+    async chmod(path: string, mode: FileMode): Promise<void> {
+        const node = this.#paths.get(`${this.closestMountpoint(path)}\0${path}`);
+        if (node === undefined) {
+            throw new Error(`ENOENT: no such file or directory, chmod '${path}'`);
+        }
+        const stats = this.#stats.get(node)!;
+        const fileTypeBits = stats.mode & 0o170000;
+        stats.mode = fileTypeBits | (mode & 0o777);
+        stats.ctime = Date.now();
+        stats.mtime = stats.ctime;
+    }
+
+    async chown(path: string, uid: number, gid: number): Promise<void> {
+        const node = this.#paths.get(`${this.closestMountpoint(path)}\0${path}`);
+        if (node === undefined) {
+            throw new Error(`ENOENT: no such file or directory, chown '${path}'`);
+        }
+        const stats = this.#stats.get(node)!;
+        stats.uid = uid;
+        stats.gid = gid;
+        stats.ctime = Date.now();
+        stats.mtime = stats.ctime;
+    }
+
     // file descriptors: numbers are allocated by the core filesystem, but using
     // onopen and onclose we store associate our open files with the file descriptors.
     #openFiles: Map<number, {
@@ -286,6 +388,10 @@ export class TmpFs {
             }
         }
 
+        const stats = this.#stats.get(node)!;
+        if (stats.type !== "FILE") {
+            throw new Error(`EISDIR: illegal operation on a directory, open '${path}'`);
+        }
         this.#openFiles.set(fd, { node, flags, position: 0 });
         this.#stats.get(node)!.atime = Date.now();
     }
@@ -401,7 +507,7 @@ export class TmpFs {
         }
 
         const stats = this.#stats.get(node);
-        if (stats == undefined || stats.type !== "FILE") {
+        if (stats == undefined || stats.type === "DIRECTORY") {
             throw new Error(`EISDIR: illegal operation on a directory, unlink '${path}'`);
         }
 
@@ -424,6 +530,7 @@ export class TmpFs {
 
         this.#paths.delete(`${mount}\0${path}`);
         this.#data.delete(node);
+        this.#symlinks.delete(node);
         this.#stats.delete(node);
     }
 }

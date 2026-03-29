@@ -31,7 +31,7 @@ export default class UpkApi implements API<"party.openv.libupk"> {
     this.defaultRootPath = path;
     return this;
   }
-
+  
   setDefaultDbPath(path: string): this {
     this.defaultDbPath = path;
     return this;
@@ -218,11 +218,30 @@ export default class UpkApi implements API<"party.openv.libupk"> {
       },
 
       async symlink(target: string, path: string): Promise<void> {
-        console.warn("symlink is not supported yet, ignoring", { target, path });
+        const fullPath = joinWithRoot(path);
+        const symlink = fs["party.openv.filesystem.write.symlink"];
+        if (!symlink) {
+          throw new Error("Filesystem symlink is not supported");
+        }
+        await symlink(target, fullPath, 0o777);
       },
 
       async chmod(path: string, mode: number): Promise<void> {
-        console.warn("chmod is not supported yet, ignoring", { path, mode });
+        const fullPath = joinWithRoot(path);
+        const chmod = fs["party.openv.filesystem.write.chmod"];
+        if (!chmod) {
+          throw new Error("Filesystem chmod is not supported");
+        }
+        await chmod(fullPath, mode);
+      },
+
+      async chown(path: string, uid: number, gid: number): Promise<void> {
+        const fullPath = joinWithRoot(path);
+        const chown = fs["party.openv.filesystem.write.chown"];
+        if (!chown) {
+          throw new Error("Filesystem chown is not supported");
+        }
+        await chown(fullPath, uid, gid);
       },
 
       async stat(path: string): Promise<{ size: number; mode: number; mtime: Date }> {

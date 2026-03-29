@@ -49,6 +49,7 @@ export interface FileSystemAdapter {
   mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<void>;
   symlink(target: string, path: string): Promise<void>;
   chmod(path: string, mode: number): Promise<void>;
+  chown(path: string, uid: number, gid: number): Promise<void>;
   stat(path: string): Promise<{ size: number; mode: number; mtime: Date }>;
   exists(path: string): Promise<boolean>;
   readFile(path: string): Promise<Uint8Array>;

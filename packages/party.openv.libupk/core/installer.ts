@@ -144,6 +144,12 @@ export class Installer {
     for (const dir of directories) {
       const fullPath = joinPath(this.rootPath, dir.path);
       await this.fs.mkdir(fullPath, { recursive: true, mode: dir.mode });
+      if (dir.mode !== undefined) {
+        await this.fs.chmod(fullPath, dir.mode);
+      }
+      if (dir.uid !== undefined || dir.gid !== undefined) {
+        await this.fs.chown(fullPath, dir.uid ?? 0, dir.gid ?? 0);
+      }
     }
 
     for (const file of regularFiles) {
@@ -160,12 +166,25 @@ export class Installer {
       if (file.mode !== undefined) {
         await this.fs.chmod(fullPath, file.mode);
       }
+      if (file.uid !== undefined || file.gid !== undefined) {
+        await this.fs.chown(fullPath, file.uid ?? 0, file.gid ?? 0);
+      }
     }
 
     for (const link of links) {
       if (link.linkTarget) {
         const fullPath = joinPath(this.rootPath, link.path);
+        const dirPath = dirname(fullPath);
+        if (dirPath) {
+          await this.fs.mkdir(dirPath, { recursive: true });
+        }
         await this.fs.symlink(link.linkTarget, fullPath);
+        if (link.mode !== undefined) {
+          await this.fs.chmod(fullPath, link.mode);
+        }
+        if (link.uid !== undefined || link.gid !== undefined) {
+          await this.fs.chown(fullPath, link.uid ?? 0, link.gid ?? 0);
+        }
       }
     }
   }

@@ -246,7 +246,19 @@ export default class FsApi implements API<"party.openv.api.filesystem"> {
   }
 
   async lstat(path: string): Promise<Stats> {
-    return this.stat(path);
+    const lstat = this.openv.system["party.openv.filesystem.read.lstat"];
+    if (!lstat) {
+      return this.stat(path);
+    }
+    return wrapStats(await lstat(path));
+  }
+
+  async readlink(path: string): Promise<string> {
+    const readlink = this.openv.system["party.openv.filesystem.read.readlink"];
+    if (!readlink) {
+      throw new Error("ENOTSUP: readlink is not supported");
+    }
+    return readlink(path);
   }
 
   async access(path: string, mode = constants.F_OK): Promise<void> {
@@ -353,6 +365,33 @@ export default class FsApi implements API<"party.openv.api.filesystem"> {
   async unlink(path: string): Promise<void> {
     await this.#requireWrite();
     await this.openv.system["party.openv.filesystem.write.unlink"]!(path);
+  }
+
+  async symlink(target: string, path: string, mode: FileMode = 0o777): Promise<void> {
+    await this.#requireWrite();
+    const symlink = this.openv.system["party.openv.filesystem.write.symlink"];
+    if (!symlink) {
+      throw new Error("ENOTSUP: symlink is not supported");
+    }
+    await symlink(target, path, mode);
+  }
+
+  async chmod(path: string, mode: FileMode): Promise<void> {
+    await this.#requireWrite();
+    const chmod = this.openv.system["party.openv.filesystem.write.chmod"];
+    if (!chmod) {
+      throw new Error("ENOTSUP: chmod is not supported");
+    }
+    await chmod(path, mode);
+  }
+
+  async chown(path: string, uid: number, gid: number): Promise<void> {
+    await this.#requireWrite();
+    const chown = this.openv.system["party.openv.filesystem.write.chown"];
+    if (!chown) {
+      throw new Error("ENOTSUP: chown is not supported");
+    }
+    await chown(path, uid, gid);
   }
 
   async rename(oldPath: string, newPath: string): Promise<void> {

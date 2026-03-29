@@ -10,11 +10,16 @@ type VFS = {
     read: (ofd: number, length: number, position?: number) => Promise<Uint8Array>;
     write: (ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null) => Promise<number>;
     stat: (path: string) => Promise<FsStats>;
+    lstat?: (path: string) => Promise<FsStats>;
+    readlink?: (path: string) => Promise<string>;
     readdir: (path: string) => Promise<string[]>;
     mkdir: (path: string, mode?: FileMode) => Promise<void>;
     rmdir: (path: string) => Promise<void>;
     rename: (oldPath: string, newPath: string) => Promise<void>;
     unlink: (path: string) => Promise<void>;
+    symlink?: (target: string, path: string, mode?: FileMode) => Promise<void>;
+    chmod?: (path: string, mode: FileMode) => Promise<void>;
+    chown?: (path: string, uid: number, gid: number) => Promise<void>;
     watch: (path: string, options?: { recursive?: boolean }) => Promise<{
         events: AsyncIterable<FileSystemEvent>;
         abort: () => Promise<void>;
@@ -535,7 +540,115 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         return provider.unlink(path);
     }
 
+    async ["party.openv.filesystem.write.symlink"](target: string, path: string, mode: FileMode = 0o777): Promise<void> {
+        const normalized = this.#normalizePath(path);
+        if (this.#fifoByPath.has(normalized) || this.#socketPathToId.has(normalized) || await this.#pathExists(normalized, false)) {
+            throw new Error(`EEXIST: file already exists, symlink '${normalized}'`);
+        }
+        const resolved = this.#resolveMountPath(path);
+        if (!resolved) {
+            throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
+        }
+        const { id } = resolved;
+        const provider = this.#vfsTable.get(id);
+        if (!provider || !provider.symlink) {
+            throw new Error(`Virtual filesystem "${id}" does not implement symlink.`);
+        }
+        return provider.symlink(target, path, mode);
+    }
+
+    async ["party.openv.filesystem.write.chmod"](path: string, mode: FileMode): Promise<void> {
+        const normalized = this.#normalizePath(path);
+        const fifoId = this.#fifoByPath.get(normalized);
+        if (fifoId !== undefined) {
+            const fifo = this.#fifoTable.get(fifoId);
+            if (!fifo) throw new Error(`ENOENT: no such file or directory, chmod '${normalized}'`);
+            fifo.mode = (fifo.mode & ~0o777) | (mode & 0o777);
+            fifo.ctime = Date.now();
+            fifo.mtime = fifo.ctime;
+            return;
+        }
+
+        const socketId = this.#socketPathToId.get(normalized);
+        if (socketId !== undefined) {
+            const socket = this.#socketTable.get(socketId);
+            if (!socket) throw new Error(`ENOENT: no such file or directory, chmod '${normalized}'`);
+            socket.mode = (socket.mode & ~0o777) | (mode & 0o777);
+            socket.ctime = Date.now();
+            socket.mtime = socket.ctime;
+            return;
+        }
+
+        const resolved = this.#resolveMountPath(path);
+        if (!resolved) {
+            throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
+        }
+        const { id } = resolved;
+        const provider = this.#vfsTable.get(id);
+        if (!provider || !provider.chmod) {
+            throw new Error(`Virtual filesystem "${id}" does not implement chmod.`);
+        }
+        return provider.chmod(path, mode);
+    }
+
+    async ["party.openv.filesystem.write.chown"](path: string, uid: number, gid: number): Promise<void> {
+        const normalized = this.#normalizePath(path);
+        const fifoId = this.#fifoByPath.get(normalized);
+        if (fifoId !== undefined) {
+            const fifo = this.#fifoTable.get(fifoId);
+            if (!fifo) throw new Error(`ENOENT: no such file or directory, chown '${normalized}'`);
+            fifo.uid = uid;
+            fifo.gid = gid;
+            fifo.ctime = Date.now();
+            fifo.mtime = fifo.ctime;
+            return;
+        }
+
+        const socketId = this.#socketPathToId.get(normalized);
+        if (socketId !== undefined) {
+            const socket = this.#socketTable.get(socketId);
+            if (!socket) throw new Error(`ENOENT: no such file or directory, chown '${normalized}'`);
+            socket.uid = uid;
+            socket.gid = gid;
+            socket.ctime = Date.now();
+            socket.mtime = socket.ctime;
+            return;
+        }
+
+        const resolved = this.#resolveMountPath(path);
+        if (!resolved) {
+            throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
+        }
+        const { id } = resolved;
+        const provider = this.#vfsTable.get(id);
+        if (!provider || !provider.chown) {
+            throw new Error(`Virtual filesystem "${id}" does not implement chown.`);
+        }
+        return provider.chown(path, uid, gid);
+    }
+
     async ["party.openv.filesystem.read.stat"](path: string): Promise<FsStats> {
+        return this.#statResolved(path, true);
+    }
+
+    async ["party.openv.filesystem.read.lstat"](path: string): Promise<FsStats> {
+        return this.#statResolved(path, false);
+    }
+
+    async ["party.openv.filesystem.read.readlink"](path: string): Promise<string> {
+        const resolved = this.#resolveMountPath(path);
+        if (!resolved) {
+            throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
+        }
+        const { id } = resolved;
+        const provider = this.#vfsTable.get(id);
+        if (!provider || !provider.readlink) {
+            throw new Error(`Virtual filesystem "${id}" does not implement readlink.`);
+        }
+        return provider.readlink(path);
+    }
+
+    async #statResolved(path: string, followSymlinks: boolean, seen: Set<string> = new Set()): Promise<FsStats> {
         const normalized = this.#normalizePath(path);
         const fifoId = this.#fifoByPath.get(normalized);
         if (fifoId !== undefined) {
@@ -588,7 +701,23 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         if (!provider || !provider.stat) {
             throw new Error(`Virtual filesystem "${id}" does not implement stat.`);
         }
-        return provider.stat(path);
+        if (!followSymlinks && provider.lstat) {
+            return provider.lstat(path);
+        }
+        const direct = await provider.stat(path);
+        if (!followSymlinks || direct.type !== "SYMLINK") {
+            return direct;
+        }
+        const target = provider.readlink ? await provider.readlink(path) : null;
+        if (!target) {
+            return direct;
+        }
+        const resolvedPath = this.#resolveSymlinkTarget(normalized, target);
+        if (resolvedPath === normalized || seen.has(resolvedPath)) {
+            throw new Error(`ELOOP: too many levels of symbolic links, stat '${normalized}'`);
+        }
+        seen.add(resolvedPath);
+        return this.#statResolved(resolvedPath, true, seen);
     }
 
     async ["party.openv.filesystem.read.read"](ofd: number, length: number, position?: number): Promise<Uint8Array> {
@@ -690,7 +819,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     }> = new Map();
 
     async ["party.openv.filesystem.open"](path: string, flags: OpenFlags, mode: FileMode): Promise<number> {
-        const normalized = this.#normalizePath(path);
+        const normalized = await this.#resolvePathWithSymlinks(path);
         const fifoId = this.#fifoByPath.get(normalized);
         if (fifoId !== undefined) {
             return this.#openFifo(fifoId, flags);
@@ -701,7 +830,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         }
 
         // Resolve path to mounted vfs provider
-        const resolved = this.#resolveMountPath(path);
+        const resolved = this.#resolveMountPath(normalized);
         if (!resolved) {
             throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
         }
@@ -717,9 +846,9 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
 
         const providerOpen = provider.open!;
         const ofd = ++this.#ofdCounter;
-        await providerOpen(path, ofd, flags, mode);
+        await providerOpen(normalized, ofd, flags, mode);
         this.#ofdTable.set(ofd, {
-            path,
+            path: normalized,
             providerId: id,
             provider,
             flags,
@@ -849,6 +978,31 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     async ["party.openv.filesystem.virtual.onunlink"](id: string, handler: (path: string) => Promise<void>): Promise<void> {
         const vfs = this.#getVfs(id);
         vfs.unlink = handler;
+    }
+
+    async ["party.openv.filesystem.virtual.onlstat"](id: string, handler: (path: string) => Promise<FsStats>): Promise<void> {
+        const vfs = this.#getVfs(id);
+        vfs.lstat = handler;
+    }
+
+    async ["party.openv.filesystem.virtual.onreadlink"](id: string, handler: (path: string) => Promise<string>): Promise<void> {
+        const vfs = this.#getVfs(id);
+        vfs.readlink = handler;
+    }
+
+    async ["party.openv.filesystem.virtual.onsymlink"](id: string, handler: (target: string, path: string, mode?: FileMode) => Promise<void>): Promise<void> {
+        const vfs = this.#getVfs(id);
+        vfs.symlink = handler;
+    }
+
+    async ["party.openv.filesystem.virtual.onchmod"](id: string, handler: (path: string, mode: FileMode) => Promise<void>): Promise<void> {
+        const vfs = this.#getVfs(id);
+        vfs.chmod = handler;
+    }
+
+    async ["party.openv.filesystem.virtual.onchown"](id: string, handler: (path: string, uid: number, gid: number) => Promise<void>): Promise<void> {
+        const vfs = this.#getVfs(id);
+        vfs.chown = handler;
     }
 
     static readonly DEFAULT_PIPE_BUFFER_SIZE = 65536;
@@ -1306,9 +1460,13 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         this.#socketTable.delete(socketId);
     }
 
-    async #pathExists(path: string): Promise<boolean> {
+    async #pathExists(path: string, followSymlinks = true): Promise<boolean> {
         try {
-            await this["party.openv.filesystem.read.stat"](path);
+            if (followSymlinks) {
+                await this["party.openv.filesystem.read.stat"](path);
+            } else {
+                await this["party.openv.filesystem.read.lstat"](path);
+            }
             return true;
         } catch {
             return false;
@@ -1322,6 +1480,35 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             normalized = normalized.replace(/\/+$/, "");
         }
         return normalized;
+    }
+
+    #resolveSymlinkTarget(linkPath: string, target: string): string {
+        if (target.startsWith("/")) {
+            return this.#normalizePath(target);
+        }
+        const base = linkPath.split("/").slice(0, -1).join("/") || "/";
+        return this.#normalizePath(`${base}/${target}`);
+    }
+
+    async #resolvePathWithSymlinks(path: string, maxDepth = 16): Promise<string> {
+        let current = this.#normalizePath(path);
+        for (let i = 0; i < maxDepth; i++) {
+            const resolved = this.#resolveMountPath(current);
+            if (!resolved) return current;
+            const provider = this.#vfsTable.get(resolved.id);
+            if (!provider || !provider.lstat || !provider.readlink) return current;
+            let st: FsStats;
+            try {
+                st = await provider.lstat(current);
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (msg.includes("ENOENT")) return current;
+                throw err;
+            }
+            if (st.type !== "SYMLINK") return current;
+            current = this.#resolveSymlinkTarget(current, await provider.readlink(current));
+        }
+        throw new Error(`ELOOP: too many levels of symbolic links, open '${path}'`);
     }
 
     async #pipeRead(pipeId: number, length: number): Promise<Uint8Array> {
@@ -1685,6 +1872,22 @@ export class ProcessScopedFS implements
         return this.#system["party.openv.filesystem.read.stat"](path);
     }
 
+    async ["party.openv.filesystem.read.lstat"](path: string): Promise<FsStats> {
+        await this.#checkPathTraversal(path);
+        if (this.#system["party.openv.filesystem.read.lstat"]) {
+            return this.#system["party.openv.filesystem.read.lstat"](path);
+        }
+        return this.#system["party.openv.filesystem.read.stat"](path);
+    }
+
+    async ["party.openv.filesystem.read.readlink"](path: string): Promise<string> {
+        await this.#checkPathTraversal(path);
+        if (!this.#system["party.openv.filesystem.read.readlink"]) {
+            throw new Error(`ENOTSUP: readlink is not supported`);
+        }
+        return this.#system["party.openv.filesystem.read.readlink"](path);
+    }
+
     async ["party.openv.filesystem.read.read"](fd: number, length: number, position?: number): Promise<Uint8Array> {
         const ofd = this.#resolveOfd(fd);
         return this.#system["party.openv.impl.filesystem.readByOfd"](ofd, length, position);
@@ -1785,6 +1988,48 @@ export class ProcessScopedFS implements
         requireAccess(newParentStat, uid, gid, "write", newParent);
         requireAccess(newParentStat, uid, gid, "execute", newParent);
         return this.#system["party.openv.filesystem.write.rename"](oldPath, newPath);
+    }
+
+    async ["party.openv.filesystem.write.symlink"](target: string, path: string, mode: FileMode = 0o777): Promise<void> {
+        await this.#checkPathTraversal(path);
+        const parent = path.split("/").slice(0, -1).join("/") || "/";
+        const parentStat = await this.#system["party.openv.filesystem.read.stat"](parent);
+        const uid = await this.#getUid();
+        const gid = await this.#getGid();
+        requireAccess(parentStat, uid, gid, "write", parent);
+        requireAccess(parentStat, uid, gid, "execute", parent);
+        if (!this.#system["party.openv.filesystem.write.symlink"]) {
+            throw new Error(`ENOTSUP: symlink is not supported`);
+        }
+        return this.#system["party.openv.filesystem.write.symlink"](target, path, this.#applyUmask(mode));
+    }
+
+    async ["party.openv.filesystem.write.chmod"](path: string, mode: FileMode): Promise<void> {
+        await this.#checkPathTraversal(path);
+        const lstat = this.#system["party.openv.filesystem.read.lstat"];
+        const stat = lstat
+            ? await lstat(path)
+            : await this.#system["party.openv.filesystem.read.stat"](path);
+        const uid = await this.#getUid();
+        if (uid !== 0 && stat.uid !== uid) {
+            throw new Error(`EPERM: operation not permitted, chmod '${path}'`);
+        }
+        if (!this.#system["party.openv.filesystem.write.chmod"]) {
+            throw new Error(`ENOTSUP: chmod is not supported`);
+        }
+        return this.#system["party.openv.filesystem.write.chmod"](path, mode);
+    }
+
+    async ["party.openv.filesystem.write.chown"](path: string, uid: number, gid: number): Promise<void> {
+        await this.#checkPathTraversal(path);
+        const callerUid = await this.#getUid();
+        if (callerUid !== 0) {
+            throw new Error(`EPERM: operation not permitted, chown '${path}'`);
+        }
+        if (!this.#system["party.openv.filesystem.write.chown"]) {
+            throw new Error(`ENOTSUP: chown is not supported`);
+        }
+        return this.#system["party.openv.filesystem.write.chown"](path, uid, gid);
     }
 
     async ["party.openv.filesystem.local.listfds"](): Promise<number[]> {

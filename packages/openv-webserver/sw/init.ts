@@ -6,7 +6,7 @@ import { CoreScriptEvaluator } from "@openv-project/openv-core/syscall/script";
 import type { PlainParameter, RegistryValue } from "@openv-project/openv-api";
 import { BRIDGE_DEFAULTS, applyBridgeConfig } from "./bridge.ts";
 import { PEER_FILTER_DEFAULTS, applyPeerFilterConfig } from "./security.ts";
-import { hydrateSystemRegistryFromIdb, startSystemRegistryPersistence, syncSystemRegistryToIdb } from "./system-registry-idb.ts";
+import { hydrateSystemRegistryFromIdb, startSystemRegistryPersistence, syncSystemRegistryToIdb } from "./regtab.ts";
 import { runBootScripts } from "./boot.ts";
 
 export const openv = new CoreOpEnv();
@@ -16,13 +16,17 @@ export const coreProcess = new CoreProcess();
 export const coreScriptEvaluator = new CoreScriptEvaluator();
 
 export const FS_FSTAB_KEY = "/system/party/openv/filesystem/fstab" as const;
+export const REGTAB_KEY = "/system/party/openv/registry/regtab" as const;
 export const BOOT_KEY = "/system/party/openv/boot" as const;
 const DEFAULT_FS_MOUNT_ID = "root" as const;
-const DEFAULT_FS_MOUNT_IMPL = "party.openv.impl.opfs" as const;
 const DEFAULT_FS_MOUNT_PATH = "/" as const;
+const DEFAULT_FS_MOUNT_IMPL = "party.openv.impl.opfs" as const;
+const DEFAULT_FS_MOUNT_EXTRA = "opfs" as const;
 const TMP_FS_MOUNT_ID = "tmp" as const;
 const TMP_FS_MOUNT_IMPL = "party.openv.impl.tmpfs" as const;
 const TMP_FS_MOUNT_PATH = "/tmp" as const;
+const DEFAULT_REGTAB_ID = "system" as const;
+const DEFAULT_REGTAB_STORE_DIR = "/var/lib/registry/system" as const;
 
 type FsMountTupleEntry = [impl: string, path: string, extra?: PlainParameter];
 type FsMountObjectEntry = {
@@ -31,15 +35,40 @@ type FsMountObjectEntry = {
     extra?: PlainParameter;
 };
 
-const FS_FSTAB_DEFAULTS: [string, string, string][] = [
-    [FS_FSTAB_KEY, DEFAULT_FS_MOUNT_ID, JSON.stringify([DEFAULT_FS_MOUNT_IMPL, DEFAULT_FS_MOUNT_PATH])],
-    [FS_FSTAB_KEY, TMP_FS_MOUNT_ID, JSON.stringify([TMP_FS_MOUNT_IMPL, TMP_FS_MOUNT_PATH])],
-];
+type RootMountConfig = {
+    impl: string;
+    path: string;
+    extra?: PlainParameter;
+};
+
+function resolveRootMountConfig(rootParam?: string | null): RootMountConfig {
+    switch ((rootParam ?? "").trim().toLowerCase()) {
+        case "tmpfs":
+            return { impl: TMP_FS_MOUNT_IMPL, path: DEFAULT_FS_MOUNT_PATH };
+        case "opfs":
+        case "":
+            return { impl: DEFAULT_FS_MOUNT_IMPL, path: DEFAULT_FS_MOUNT_PATH, extra: DEFAULT_FS_MOUNT_EXTRA };
+        default:
+            return { impl: DEFAULT_FS_MOUNT_IMPL, path: DEFAULT_FS_MOUNT_PATH, extra: DEFAULT_FS_MOUNT_EXTRA };
+    }
+}
+
+function fsFstabDefaults(rootMount: RootMountConfig): [string, string, string][] {
+    const rootTuple: [string, string, PlainParameter?] = [rootMount.impl, rootMount.path, rootMount.extra];
+    return [
+        [FS_FSTAB_KEY, DEFAULT_FS_MOUNT_ID, JSON.stringify(rootTuple)],
+        [FS_FSTAB_KEY, TMP_FS_MOUNT_ID, JSON.stringify([TMP_FS_MOUNT_IMPL, TMP_FS_MOUNT_PATH])],
+    ];
+}
 
 const BOOT_DEFAULTS: [string, string, RegistryValue][] = [
     [BOOT_KEY, "enabled", true],
     [BOOT_KEY, "scripts", JSON.stringify(["/boot/**"])],
     [BOOT_KEY, "stopOnError", false],
+];
+
+const REGTAB_DEFAULTS: [string, string, RegistryValue][] = [
+    [REGTAB_KEY, DEFAULT_REGTAB_ID, JSON.stringify({ baseKey: "/system", storeDir: DEFAULT_REGTAB_STORE_DIR })],
 ];
 
 openv.installSystemComponent(coreRegistry);
@@ -59,15 +88,19 @@ export async function ensureInitialized(): Promise<void> {
     if (initPromise) return initPromise;
 
     initPromise = (async () => {
+        const swUrl = new URL(self.location.href);
+        const rootMount = resolveRootMountConfig(swUrl.searchParams.get("root"));
+
         await new TmpFs().register(coreFs);
         await new OPFS().register(coreFs);
+        await coreFs["party.openv.filesystem.virtual.mount"](rootMount.impl, rootMount.path, rootMount.extra);
 
-        await hydrateSystemRegistryFromIdb(coreRegistry);
+        await hydrateSystemRegistryFromIdb(coreRegistry, coreFs);
         await scaffoldRegistry();
         await applyFsMountsFromRegistry();
         await scaffoldBootDirectory();
-        await syncSystemRegistryToIdb(coreRegistry);
-        await startSystemRegistryPersistence(coreRegistry);
+        await syncSystemRegistryToIdb(coreRegistry, coreFs);
+        await startSystemRegistryPersistence(coreRegistry, coreFs);
         await applyBridgeConfig();
         await applyPeerFilterConfig();
 
@@ -118,6 +151,7 @@ async function scaffoldRegistry(): Promise<void> {
     await ensureKey(FS_FSTAB_KEY);
     await ensureKey("/system/party/openv/registry");
     await ensureKey("/system/party/openv/registry/acl");
+    await ensureKey(REGTAB_KEY);
     await ensureKey("/system/party/openv/serviceWorker");
     await ensureKey("/system/party/openv/serviceWorker/bridge");
     await ensureKey("/system/party/openv/serviceWorker/peerFilter");
@@ -151,7 +185,10 @@ async function scaffoldRegistry(): Promise<void> {
         write: 0,
     }));
 
-    for (const [key, entry, value] of [...BRIDGE_DEFAULTS, ...PEER_FILTER_DEFAULTS, ...FS_FSTAB_DEFAULTS, ...BOOT_DEFAULTS]) {
+    const swUrl = new URL(self.location.href);
+    const rootMount = resolveRootMountConfig(swUrl.searchParams.get("root"));
+    const defaults = fsFstabDefaults(rootMount);
+    for (const [key, entry, value] of [...BRIDGE_DEFAULTS, ...PEER_FILTER_DEFAULTS, ...defaults, ...REGTAB_DEFAULTS, ...BOOT_DEFAULTS]) {
         await ensureDefault(key, entry, value);
     }
 }
@@ -203,7 +240,13 @@ async function applyFsMountsFromRegistry(): Promise<void> {
             continue;
         }
 
-        await coreFs["party.openv.filesystem.virtual.mount"](mount.impl, mount.path, mount.extra);
+        try {
+            await coreFs["party.openv.filesystem.virtual.mount"](mount.impl, mount.path, mount.extra);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            if (message.includes("already") || message.includes("occupied")) continue;
+            throw err;
+        }
     }
 }
 

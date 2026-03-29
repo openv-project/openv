@@ -127,7 +127,9 @@ async function ensureServiceWorkerReady(): Promise<void> {
         return;
     }
 
-    const registration = await navigator.serviceWorker.register("/sw.js", { type: "module" });
+    const swUrl = new URL("/sw.js", location.origin);
+    swUrl.searchParams.set("root", "opfs");
+    const registration = await navigator.serviceWorker.register(swUrl.toString(), { type: "module" });
 
     if (registration.installing) {
         await new Promise<void>((resolve) => {

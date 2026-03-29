@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import { FsStats } from "@openv-project/openv-api";
 import { coreFs, coreRegistry, ensureInitialized } from "./init.ts";
 
 declare const self: ServiceWorkerGlobalScope;
@@ -501,20 +502,7 @@ export async function handleBridgeMessage(event: ExtendableMessageEvent): Promis
         return true;
 }
 
-type FsStat = {
-    type: "DIRECTORY" | "FILE";
-    size: number;
-    atime: number;
-    mtime: number;
-    ctime: number;
-    name: string;
-    uid: number;
-    gid: number;
-    mode: number;
-    node: string;
-};
-
-async function serveFsFile(fsPath: string, stat: FsStat, forcedContentType?: string): Promise<Response> {
+async function serveFsFile(fsPath: string, stat: FsStats, forcedContentType?: string): Promise<Response> {
     const contentType = forcedContentType ?? guessContentType(fsPath);
     const validator = makeValidator(fsPath, stat);
 
@@ -577,7 +565,7 @@ async function refreshCachedEntry(fsPath: string, priorValidator: string | null)
 
 async function readAndBuildFileResponse(
     fsPath: string,
-    stat: FsStat,
+    stat: FsStats,
     contentType: string,
     validator: string,
 ): Promise<Response> {
@@ -614,7 +602,7 @@ function getFsCache(): Promise<Cache> {
     return fsCachePromise;
 }
 
-function makeValidator(fsPath: string, stat: FsStat): string {
+function makeValidator(fsPath: string, stat: FsStats): string {
     return [fsPath, stat.type, stat.size, stat.mtime, stat.ctime, stat.node].join("|");
 }
 

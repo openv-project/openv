@@ -6,13 +6,14 @@ const INTERNAL_ATTRS_FILE = ".attrs";
 const SANITIZE_PREFIX = ".openv$name$";
 
 type AttrEntry = {
-	type: "DIRECTORY" | "FILE";
+	type: "DIRECTORY" | "FILE" | "SYMLINK";
 	uid: number;
 	gid: number;
 	mode: FileMode;
 	ctime: number;
 	mtime: number;
 	atime: number;
+	target?: string;
 };
 
 type AttrMap = Record<string, AttrEntry>;
@@ -107,7 +108,7 @@ function nowMs(): number {
 	return Date.now();
 }
 
-function defaultEntry(type: "DIRECTORY" | "FILE", mode: FileMode): AttrEntry {
+function defaultEntry(type: "DIRECTORY" | "FILE" | "SYMLINK", mode: FileMode): AttrEntry {
 	const t = nowMs();
 	return {
 		type,
@@ -184,6 +185,12 @@ export class OPFS {
 		await system["party.openv.filesystem.virtual.onstat"](OPFS_NAMESPACE,
 			async (path: string) => await this.#runSerialized(async () => await this.stat(normalizePath(path)))
 		);
+		await system["party.openv.filesystem.virtual.onlstat"]?.(OPFS_NAMESPACE,
+			async (path: string) => await this.#runSerialized(async () => await this.lstat(normalizePath(path)))
+		);
+		await system["party.openv.filesystem.virtual.onreadlink"]?.(OPFS_NAMESPACE,
+			async (path: string) => await this.#runSerialized(async () => await this.readlink(normalizePath(path)))
+		);
 		await system["party.openv.filesystem.virtual.onreaddir"](OPFS_NAMESPACE,
 			async (path: string) => await this.#runSerialized(async () => await this.readdir(normalizePath(path)))
 		);
@@ -216,6 +223,15 @@ export class OPFS {
 		);
 		await system["party.openv.filesystem.virtual.onunlink"](OPFS_NAMESPACE,
 			async (path: string) => await this.#runSerialized(async () => await this.unlink(normalizePath(path)))
+		);
+		await system["party.openv.filesystem.virtual.onsymlink"]?.(OPFS_NAMESPACE,
+			async (target: string, path: string, mode?: FileMode) => await this.#runSerialized(async () => await this.symlink(target, normalizePath(path), mode))
+		);
+		await system["party.openv.filesystem.virtual.onchmod"]?.(OPFS_NAMESPACE,
+			async (path: string, mode: FileMode) => await this.#runSerialized(async () => await this.chmod(normalizePath(path), mode))
+		);
+		await system["party.openv.filesystem.virtual.onchown"]?.(OPFS_NAMESPACE,
+			async (path: string, uid: number, gid: number) => await this.#runSerialized(async () => await this.chown(normalizePath(path), uid, gid))
 		);
 		await system["party.openv.filesystem.virtual.onrename"](OPFS_NAMESPACE,
 			async (oldPath: string, newPath: string) => await this.#runSerialized(async () => await this.rename(normalizePath(oldPath), normalizePath(newPath)))
@@ -292,6 +308,34 @@ export class OPFS {
 	}
 
 	async stat(path: string): Promise<FsStats<typeof OPFS_NAMESPACE>> {
+		return this.#statInternal(path, false);
+	}
+
+	async lstat(path: string): Promise<FsStats<typeof OPFS_NAMESPACE>> {
+		return this.#statInternal(path, false);
+	}
+
+	async readlink(path: string): Promise<string> {
+		const resolved = this.#resolvePath(path);
+		if (!resolved || resolved.relativePath === "/") {
+			throw new Error(`EINVAL: invalid argument, readlink '${path}'`);
+		}
+
+		const parent = await this.#getDirectoryHandleByRelativePath(resolved.mount, parentPath(resolved.relativePath));
+		const segment = splitPath(resolved.relativePath).at(-1);
+		if (!segment) {
+			throw new Error(`EINVAL: invalid argument, readlink '${path}'`);
+		}
+		const wireName = marshalName(segment);
+		const attrs = await this.#readAttrs(parent);
+		const attr = attrs[wireName];
+		if (!attr || attr.type !== "SYMLINK" || typeof attr.target !== "string") {
+			throw new Error(`EINVAL: invalid argument, readlink '${path}'`);
+		}
+		return attr.target;
+	}
+
+	async #statInternal(path: string, followSymlink: boolean): Promise<FsStats<typeof OPFS_NAMESPACE>> {
 		const resolved = this.#resolvePath(path);
 		if (!resolved) {
 			throw new Error(`ENOENT: no such file or directory, stat '${path}'`);
@@ -315,6 +359,30 @@ export class OPFS {
 
 		const attrs = await this.#readAttrs(parent);
 		const attr = attrs[wireName];
+		if (attr?.type === "SYMLINK") {
+			if (!followSymlink) {
+				const t = nowMs();
+				return {
+					type: "SYMLINK",
+					size: attr.target?.length ?? 0,
+					atime: attr.atime ?? t,
+					mtime: attr.mtime ?? t,
+					ctime: attr.ctime ?? t,
+					name: segment,
+					uid: attr.uid ?? 0,
+					gid: attr.gid ?? 0,
+					mode: attr.mode ?? 0o120777,
+					node: OPFS_NAMESPACE,
+				};
+			}
+			if (!attr.target) {
+				throw new Error(`ENOENT: broken symlink, stat '${path}'`);
+			}
+			const targetPath = attr.target.startsWith("/")
+				? normalizePath(attr.target)
+				: normalizePath(`${parentPath(path)}/${attr.target}`);
+			return this.#statInternal(targetPath, true);
+		}
 
 		if (kind === "FILE") {
 			const fileHandle = await parent.getFileHandle(wireName);
@@ -360,6 +428,12 @@ export class OPFS {
 		for await (const [name] of dir.entries()) {
 			if (name === INTERNAL_ATTRS_FILE) continue;
 			entries.push(unmarshalName(name));
+		}
+		const attrs = await this.#readAttrs(dir);
+		for (const [wireName, attr] of Object.entries(attrs)) {
+			if (attr.type !== "SYMLINK") continue;
+			const name = unmarshalName(wireName);
+			if (!entries.includes(name)) entries.push(name);
 		}
 		return entries;
 	}
@@ -440,6 +514,74 @@ export class OPFS {
 		this.#invalidateDirCache(resolved.mount, parentRel, false);
 	}
 
+	async symlink(target: string, path: string, mode?: FileMode): Promise<void> {
+		const resolved = this.#resolvePath(path);
+		if (!resolved || resolved.relativePath === "/") {
+			throw new Error(`EEXIST: file already exists, symlink '${path}'`);
+		}
+		const parentRel = parentPath(resolved.relativePath);
+		const segment = baseName(resolved.relativePath);
+		const wireName = marshalName(segment);
+		const parent = await this.#getDirectoryHandleByRelativePath(resolved.mount, parentRel);
+		if (await this.#entryKind(parent, wireName)) {
+			throw new Error(`EEXIST: file already exists, symlink '${path}'`);
+		}
+		await this.#upsertAttr(parent, wireName, {
+			...defaultEntry("SYMLINK", (mode ?? 0o777) | 0o120000),
+			target,
+		});
+		await this.#touchDirMetadata(resolved.mount, parentRel);
+		this.#invalidateDirCache(resolved.mount, parentRel, false);
+	}
+
+	async chmod(path: string, mode: FileMode): Promise<void> {
+		const resolved = this.#resolvePath(path);
+		if (!resolved || resolved.relativePath === "/") {
+			throw new Error(`ENOENT: no such file or directory, chmod '${path}'`);
+		}
+		const parentRel = parentPath(resolved.relativePath);
+		const segment = baseName(resolved.relativePath);
+		const wireName = marshalName(segment);
+		const parent = await this.#getDirectoryHandleByRelativePath(resolved.mount, parentRel);
+		const attrs = await this.#readAttrs(parent);
+		const prev = attrs[wireName];
+		if (!prev) {
+			throw new Error(`ENOENT: no such file or directory, chmod '${path}'`);
+		}
+		const typeBits = prev.mode & 0o170000;
+		attrs[wireName] = {
+			...prev,
+			mode: typeBits | (mode & 0o777),
+			ctime: nowMs(),
+			mtime: nowMs(),
+		};
+		await this.#writeAttrs(parent, attrs);
+	}
+
+	async chown(path: string, uid: number, gid: number): Promise<void> {
+		const resolved = this.#resolvePath(path);
+		if (!resolved || resolved.relativePath === "/") {
+			throw new Error(`ENOENT: no such file or directory, chown '${path}'`);
+		}
+		const parentRel = parentPath(resolved.relativePath);
+		const segment = baseName(resolved.relativePath);
+		const wireName = marshalName(segment);
+		const parent = await this.#getDirectoryHandleByRelativePath(resolved.mount, parentRel);
+		const attrs = await this.#readAttrs(parent);
+		const prev = attrs[wireName];
+		if (!prev) {
+			throw new Error(`ENOENT: no such file or directory, chown '${path}'`);
+		}
+		attrs[wireName] = {
+			...prev,
+			uid,
+			gid,
+			ctime: nowMs(),
+			mtime: nowMs(),
+		};
+		await this.#writeAttrs(parent, attrs);
+	}
+
 	async unlink(path: string): Promise<void> {
 		const resolved = this.#resolvePath(path);
 		if (!resolved || resolved.relativePath === "/") {
@@ -451,6 +593,14 @@ export class OPFS {
 		const wireName = marshalName(segment);
 		const parent = await this.#getDirectoryHandleByRelativePath(resolved.mount, parentRel);
 
+		const attrs = await this.#readAttrs(parent);
+		const attr = attrs[wireName];
+		if (attr?.type === "SYMLINK") {
+			await this.#deleteAttr(parent, wireName);
+			await this.#touchDirMetadata(resolved.mount, parentRel);
+			this.#invalidateDirCache(resolved.mount, parentRel, false);
+			return;
+		}
 		const file = await this.#tryGetFileHandle(parent, wireName);
 		if (!file) {
 			const dir = await this.#tryGetDirectoryHandle(parent, wireName);
@@ -500,10 +650,15 @@ export class OPFS {
 		}
 
 		const oldAttrs = await this.#readAttrs(oldParent);
-		const carriedAttr = oldAttrs[oldWire] ?? defaultEntry(oldKind, oldKind === "FILE" ? 0o666 : 0o777);
+		const carriedAttr = oldAttrs[oldWire] ?? defaultEntry(
+			oldKind,
+			oldKind === "FILE" ? 0o666 : oldKind === "DIRECTORY" ? 0o777 : 0o120777,
+		);
 
-		await this.#copyEntry(oldParent, oldWire, newParent, newWire, oldKind);
-		await oldParent.removeEntry(oldWire, { recursive: true });
+		if (oldKind !== "SYMLINK") {
+			await this.#copyEntry(oldParent, oldWire, newParent, newWire, oldKind);
+			await oldParent.removeEntry(oldWire, { recursive: true });
+		}
 
 		await this.#deleteAttr(oldParent, oldWire);
 		await this.#upsertAttr(newParent, newWire, {
@@ -528,6 +683,11 @@ export class OPFS {
 		const parent = await this.#getDirectoryHandleByRelativePath(resolved.mount, parentRel);
 
 		const kind = await this.#entryKind(parent, wireName);
+		const attrs = await this.#readAttrs(parent);
+		const attr = attrs[wireName];
+		if (attr?.type === "SYMLINK") {
+			throw new Error(`EISDIR: illegal operation on a directory, open '${path}'`);
+		}
 		if (!kind) {
 			if (!shouldCreateOnOpen(flags)) {
 				throw new Error(`ENOENT: no such file or directory, open '${path}'`);
@@ -652,8 +812,11 @@ export class OPFS {
 		srcName: string,
 		dstParent: FileSystemDirectoryHandle,
 		dstName: string,
-		kind: "DIRECTORY" | "FILE",
+		kind: "DIRECTORY" | "FILE" | "SYMLINK",
 	): Promise<void> {
+		if (kind === "SYMLINK") {
+			return;
+		}
 		if (kind === "FILE") {
 			const srcFile = await srcParent.getFileHandle(srcName);
 			const srcBlob = await (await srcFile.getFile()).arrayBuffer();
@@ -743,10 +906,13 @@ export class OPFS {
 		}
 	}
 
-	async #entryKind(parent: FileSystemDirectoryHandle, name: string): Promise<"DIRECTORY" | "FILE" | null> {
+	async #entryKind(parent: FileSystemDirectoryHandle, name: string): Promise<"DIRECTORY" | "FILE" | "SYMLINK" | null> {
 		if (name === INTERNAL_ATTRS_FILE) return null;
 		if (await this.#tryGetFileHandle(parent, name)) return "FILE";
 		if (await this.#tryGetDirectoryHandle(parent, name)) return "DIRECTORY";
+		const attrs = await this.#readAttrs(parent);
+		const attr = attrs[name];
+		if (attr?.type === "SYMLINK") return "SYMLINK";
 		return null;
 	}
 
@@ -780,15 +946,16 @@ export class OPFS {
 			for (const [k, v] of Object.entries(parsed)) {
 				if (!v || typeof v !== "object") continue;
 				const e = v as Partial<AttrEntry>;
-				if (e.type !== "FILE" && e.type !== "DIRECTORY") continue;
+				if (e.type !== "FILE" && e.type !== "DIRECTORY" && e.type !== "SYMLINK") continue;
 				out[k] = {
 					type: e.type,
 					uid: typeof e.uid === "number" ? e.uid : 0,
 					gid: typeof e.gid === "number" ? e.gid : 0,
-					mode: typeof e.mode === "number" ? e.mode : (e.type === "FILE" ? 0o666 : 0o777),
+					mode: typeof e.mode === "number" ? e.mode : (e.type === "FILE" ? 0o666 : e.type === "DIRECTORY" ? 0o777 : 0o120777),
 					ctime: typeof e.ctime === "number" ? e.ctime : nowMs(),
 					mtime: typeof e.mtime === "number" ? e.mtime : nowMs(),
 					atime: typeof e.atime === "number" ? e.atime : nowMs(),
+					target: typeof e.target === "string" ? e.target : undefined,
 				};
 			}
 			return out;

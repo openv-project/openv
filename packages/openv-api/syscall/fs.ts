@@ -6,7 +6,7 @@ export type OpenFlags = "r" | "a" | "ax" | "a+" | "r+" | "w" | "wx" | "w+" | "wx
 export type FileMode = number;
 
 export interface FsStats<T extends string = string> {
-    type: "DIRECTORY" | "FILE";
+    type: "DIRECTORY" | "FILE" | "SYMLINK";
     size: number;
     atime: number;
     mtime: number;
@@ -97,6 +97,8 @@ export interface FileSystemCoreComponent extends SystemComponent<FS_NAMESPACE_VE
  */
 export interface FileSystemReadOnlyComponent extends SystemComponent<FS_READ_NAMESPACE_VERSIONED, FS_READ_NAMESPACE> {
     ["party.openv.filesystem.read.stat"](path: string): Promise<FsStats>;
+    ["party.openv.filesystem.read.lstat"](path: string): Promise<FsStats>;
+    ["party.openv.filesystem.read.readlink"](path: string): Promise<string>;
     /**
      * Read from an open file. Accepts the same kind of number that `open` returned
      * (global open file number in system environment, local fd in process environment).
@@ -107,7 +109,7 @@ export interface FileSystemReadOnlyComponent extends SystemComponent<FS_READ_NAM
         events: AsyncIterable<FileSystemEvent>;
         abort: () => Promise<void>;
     }>;
-    // FUTURE: symlink management + permissions management
+    // FUTURE: extended permissions management
 }
 
 /**
@@ -127,8 +129,11 @@ export interface FileSystemReadWriteComponent extends SystemComponent<FS_WRITE_N
     ["party.openv.filesystem.write.rmdir"](path: string): Promise<void>;
     ["party.openv.filesystem.write.rename"](oldPath: string, newPath: string): Promise<void>;
     ["party.openv.filesystem.write.unlink"](path: string): Promise<void>;
+    ["party.openv.filesystem.write.symlink"]?(target: string, path: string, mode?: FileMode): Promise<void>;
+    ["party.openv.filesystem.write.chmod"]?(path: string, mode: FileMode): Promise<void>;
+    ["party.openv.filesystem.write.chown"]?(path: string, uid: number, gid: number): Promise<void>;
 
-    // FUTURE: symlink management + permissions management
+    // FUTURE: extended permissions management
 }
 
 /**
@@ -222,6 +227,11 @@ export interface FileSystemVirtualComponent extends SystemComponent<FS_VIRTUAL_N
     ["party.openv.filesystem.virtual.onrmdir"](id: string, handler: (path: string) => Promise<void>): Promise<void>;
     ["party.openv.filesystem.virtual.onrename"](id: string, handler: (oldPath: string, newPath: string) => Promise<void>): Promise<void>;
     ["party.openv.filesystem.virtual.onunlink"](id: string, handler: (path: string) => Promise<void>): Promise<void>;
+    ["party.openv.filesystem.virtual.onlstat"]?(id: string, handler: (path: string) => Promise<FsStats>): Promise<void>;
+    ["party.openv.filesystem.virtual.onreadlink"]?(id: string, handler: (path: string) => Promise<string>): Promise<void>;
+    ["party.openv.filesystem.virtual.onsymlink"]?(id: string, handler: (target: string, path: string, mode?: FileMode) => Promise<void>): Promise<void>;
+    ["party.openv.filesystem.virtual.onchmod"]?(id: string, handler: (path: string, mode: FileMode) => Promise<void>): Promise<void>;
+    ["party.openv.filesystem.virtual.onchown"]?(id: string, handler: (path: string, uid: number, gid: number) => Promise<void>): Promise<void>;
     ["party.openv.filesystem.virtual.onwatch"](id: string, handler: (path: string, options?: { recursive?: boolean }) => Promise<{
         events: AsyncIterable<FileSystemEvent>;
         abort: () => Promise<void>;
