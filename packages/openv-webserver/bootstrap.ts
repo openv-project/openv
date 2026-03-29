@@ -231,36 +231,37 @@ async function installSelected(openv: OpEnv<any>, selectedPackagePaths: string[]
     setProgress(0, packageQueue.length);
     appendLog(`Selected ${packageQueue.length} package(s): ${packageQueue.join(", ")}`);
 
-    const installedPackages: string[] = [];
-    let totalFiles = 0;
     let completedPackages = 0;
+    const installResults = await Promise.all(
+        packageQueue.map(async (packagePath) => {
+            renderStatus(`Fetching ${packagePath}...`);
+            appendLog(`Fetching ${packagePath}`);
 
-    for (const packagePath of packageQueue) {
-        renderStatus(`Fetching ${packagePath}...`);
-        appendLog(`Fetching ${packagePath}`);
+            const packageRes = await fetch(packagePath);
+            if (!packageRes.ok) {
+                throw new Error(`Failed to fetch ${packagePath}: ${packageRes.status}`);
+            }
 
-        const packageRes = await fetch(packagePath);
-        if (!packageRes.ok) {
-            throw new Error(`Failed to fetch ${packagePath}: ${packageRes.status}`);
-        }
+            appendLog(`Fetched ${packagePath} (${packageRes.status})`);
+            renderStatus(`Installing ${packagePath}...`);
+            appendLog(`Installing ${packagePath}`);
 
-        appendLog(`Fetched ${packagePath} (${packageRes.status})`);
-        renderStatus(`Installing ${packagePath}...`);
-        appendLog(`Installing ${packagePath}`);
+            const packageData = new Uint8Array(await packageRes.arrayBuffer());
+            const result = await upk.install(packageData, { overwrite: true });
+            if (result.status === "failed") {
+                throw new Error(result.message ?? `UPK install failed for ${packagePath}`);
+            }
 
-        const packageData = new Uint8Array(await packageRes.arrayBuffer());
-        const result = await upk.install(packageData, { overwrite: true });
-        if (result.status === "failed") {
-            throw new Error(result.message ?? `UPK install failed for ${packagePath}`);
-        }
+            completedPackages += 1;
+            setProgress(completedPackages, packageQueue.length);
+            appendLog(`Installed ${result.packageName}: ${result.filesInstalled} file(s)`);
 
-        installedPackages.push(result.packageName);
-        totalFiles += result.filesInstalled;
-        completedPackages += 1;
+            return result;
+        })
+    );
 
-        setProgress(completedPackages, packageQueue.length);
-        appendLog(`Installed ${result.packageName}: ${result.filesInstalled} file(s)`);
-    }
+    const installedPackages = installResults.map((result) => result.packageName);
+    const totalFiles = installResults.reduce((sum, result) => sum + result.filesInstalled, 0);
 
     await system["party.openv.registry.write.createKey"](BOOTSTRAP_KEY).catch(() => { });
     await system["party.openv.registry.write.writeEntry"](BOOTSTRAP_KEY, "completed", true);

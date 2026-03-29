@@ -306,6 +306,8 @@ async function buildPackage(
             console.log(`  js: ${pkg.distName} (bundled esm entry)`);
         } else if (pkg.distName === "hterm") {
             const htermRoot = srcDir;
+            const libdotRoot = join(ROOT, LIBAPPS_SUBMODULE_PATH, "libdot");
+            const libdotBuildRoot = join(packageInstallDir, "libdot");
             const htermPackageJson = JSON.parse(await readFile(join(htermRoot, "package.json"), "utf8")) as { version?: string };
             const htermVersion = htermPackageJson.version ?? "0.0.0";
             const gitCommitHash = execSync(`git -C "${join(ROOT, LIBAPPS_SUBMODULE_PATH)}" rev-parse --short HEAD`, { encoding: "utf8" }).trim();
@@ -345,6 +347,9 @@ async function buildPackage(
             const htermBuildArtifactAliasPlugin: esbuild.Plugin = {
                 name: "hterm-build-artifact-alias",
                 setup(build) {
+                    build.onResolve({ filter: /^\.\/dist\/js\/libdot_resources\.js$/ }, () => ({
+                        path: join(libdotBuildRoot, "dist/js/libdot_resources.js"),
+                    }));
                     build.onResolve({ filter: /^\.\/dist\/js\/hterm_resources\.js$/ }, () => ({
                         path: join(packageInstallDir, "dist/js/hterm_resources.js"),
                     }));
@@ -355,6 +360,30 @@ async function buildPackage(
             };
 
             await esbuild.build({
+                entryPoints: [join(libdotRoot, "js/deps_resources.shim.js")],
+                outfile: join(libdotBuildRoot, "dist/js/libdot_resources.js"),
+                format: "esm",
+                bundle: true,
+                platform: "browser",
+                target: "es2022",
+                minify: true,
+                sourcemap: true,
+                plugins: [packageJsonShimPlugin],
+            });
+
+            await esbuild.build({
+                entryPoints: [join(libdotRoot, "index.js")],
+                outfile: join(libdotBuildRoot, "dist/js/libdot.js"),
+                format: "esm",
+                bundle: true,
+                platform: "browser",
+                target: "es2022",
+                minify: true,
+                sourcemap: true,
+                plugins: [htermBuildArtifactAliasPlugin],
+            });
+
+            await esbuild.build({
                 entryPoints: [join(htermRoot, "js/deps_resources.shim.js")],
                 outfile: join(packageInstallDir, "dist/js/hterm_resources.js"),
                 format: "esm",
@@ -363,7 +392,6 @@ async function buildPackage(
                 target: "es2022",
                 minify: true,
                 sourcemap: true,
-                external: ["../../../libdot/index.js"],
                 loader: {
                     ".html": "text",
                     ".svg": "text",
@@ -394,7 +422,6 @@ async function buildPackage(
                 target: "es2022",
                 minify: true,
                 sourcemap: true,
-                external: ["../../libdot/index.js", "../../../libdot/index.js"],
                 plugins: [htermBuildArtifactAliasPlugin],
             });
 
