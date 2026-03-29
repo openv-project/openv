@@ -1,7 +1,7 @@
 import type { API, FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemVirtualComponent, OpEnv, OpEnvSystem, PlainParameter, RegistryReadComponent, RegistryWriteComponent, SystemComponent, SystemLinkTransport } from "@openv-project/openv-api";
 import { CoreSystemLinkPeer } from "./mod";
 
-export class CoreOpEnv implements OpEnv<RegistryReadComponent & RegistryWriteComponent>, OpEnvSystem {
+export class CoreOpEnv<T extends SystemComponent<any, any> = SystemComponent<any, any>> implements OpEnv<T>, OpEnvSystem {
     #api: { [key: string]: API } = {};
 
     get api(): { readonly [key: string]: API; } {
@@ -84,7 +84,7 @@ export class CoreOpEnv implements OpEnv<RegistryReadComponent & RegistryWriteCom
         }
     });
 
-    get system(): RegistryReadComponent & RegistryWriteComponent & FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemReadWriteComponent & FileSystemVirtualComponent {
+    get system(): T {
         return this.#syscallProxy;
     }
 

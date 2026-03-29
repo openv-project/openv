@@ -2,17 +2,21 @@
 import {
     CoreFS, CoreOpEnv, CoreProcess, CoreRegistry, OPFS, TmpFs,
 } from "@openv-project/openv-core";
+import { CoreScriptEvaluator } from "@openv-project/openv-core/syscall/script";
 import type { PlainParameter, RegistryValue } from "@openv-project/openv-api";
 import { BRIDGE_DEFAULTS, applyBridgeConfig } from "./bridge.ts";
 import { PEER_FILTER_DEFAULTS, applyPeerFilterConfig } from "./security.ts";
 import { hydrateSystemRegistryFromIdb, startSystemRegistryPersistence, syncSystemRegistryToIdb } from "./system-registry-idb.ts";
+import { runBootScripts } from "./boot.ts";
 
 export const openv = new CoreOpEnv();
 export const coreRegistry = new CoreRegistry();
 export const coreFs = new CoreFS();
 export const coreProcess = new CoreProcess();
+export const coreScriptEvaluator = new CoreScriptEvaluator();
 
 export const FS_FSTAB_KEY = "/system/party/openv/filesystem/fstab" as const;
+export const BOOT_KEY = "/system/party/openv/boot" as const;
 const DEFAULT_FS_MOUNT_ID = "root" as const;
 const DEFAULT_FS_MOUNT_IMPL = "party.openv.impl.opfs" as const;
 const DEFAULT_FS_MOUNT_PATH = "/" as const;
@@ -32,9 +36,16 @@ const FS_FSTAB_DEFAULTS: [string, string, string][] = [
     [FS_FSTAB_KEY, TMP_FS_MOUNT_ID, JSON.stringify([TMP_FS_MOUNT_IMPL, TMP_FS_MOUNT_PATH])],
 ];
 
+const BOOT_DEFAULTS: [string, string, RegistryValue][] = [
+    [BOOT_KEY, "enabled", true],
+    [BOOT_KEY, "scripts", JSON.stringify(["/boot/**"])],
+    [BOOT_KEY, "stopOnError", false],
+];
+
 openv.installSystemComponent(coreRegistry);
 openv.installSystemComponent(coreFs);
 openv.installSystemComponent(coreProcess);
+openv.installSystemComponent(coreScriptEvaluator);
 coreProcess.setFsExt(coreFs);
 
 // expose openv global for debug
@@ -54,10 +65,14 @@ export async function ensureInitialized(): Promise<void> {
         await hydrateSystemRegistryFromIdb(coreRegistry);
         await scaffoldRegistry();
         await applyFsMountsFromRegistry();
+        await scaffoldBootDirectory();
         await syncSystemRegistryToIdb(coreRegistry);
         await startSystemRegistryPersistence(coreRegistry);
         await applyBridgeConfig();
         await applyPeerFilterConfig();
+
+        // Run boot scripts after all core systems are initialized
+        await runBootScripts(openv);
 
         initialized = true;
         initPromise = null;
@@ -106,6 +121,7 @@ async function scaffoldRegistry(): Promise<void> {
     await ensureKey("/system/party/openv/serviceWorker");
     await ensureKey("/system/party/openv/serviceWorker/bridge");
     await ensureKey("/system/party/openv/serviceWorker/peerFilter");
+    await ensureKey(BOOT_KEY);
 
     await ensureKey("/api/party");
     await ensureKey("/api/party/openv");
@@ -135,7 +151,7 @@ async function scaffoldRegistry(): Promise<void> {
         write: 0,
     }));
 
-    for (const [key, entry, value] of [...BRIDGE_DEFAULTS, ...PEER_FILTER_DEFAULTS, ...FS_FSTAB_DEFAULTS]) {
+    for (const [key, entry, value] of [...BRIDGE_DEFAULTS, ...PEER_FILTER_DEFAULTS, ...FS_FSTAB_DEFAULTS, ...BOOT_DEFAULTS]) {
         await ensureDefault(key, entry, value);
     }
 }
@@ -188,5 +204,13 @@ async function applyFsMountsFromRegistry(): Promise<void> {
         }
 
         await coreFs["party.openv.filesystem.virtual.mount"](mount.impl, mount.path, mount.extra);
+    }
+}
+
+async function scaffoldBootDirectory(): Promise<void> {
+    try {
+        await coreFs["party.openv.filesystem.write.mkdir"]("/boot", 0o755);
+    } catch {
+        // Directory may already exist
     }
 }
