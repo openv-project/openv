@@ -93,6 +93,16 @@ const PACKAGES: PackageConfig[] = [
         bootstrapDefaultSelected: false,
         bootstrapLabel: "DevFS API"
     },
+    {
+        src: "third_party/libapps/hterm",
+        installPath: "/lib/hterm",
+        distName: "hterm",
+        buildUpk: true,
+        manifestPath: "third_party/hterm.manifest",
+        bootstrapSelectable: true,
+        bootstrapDefaultSelected: true,
+        bootstrapLabel: "hterm"
+    },
     { 
         src: "packages/openv-webos", 
         installPath: "/srv/openv-webos", 
@@ -126,9 +136,25 @@ const PACKAGES: PackageConfig[] = [
 ];
 
 const WEBSERVER = join(ROOT, "packages/openv-webserver");
+const LIBAPPS_SUBMODULE_PATH = "third_party/libapps";
 
 async function ensureDir(dir: string) {
     await mkdir(dir, { recursive: true });
+}
+
+async function ensureLibappsSubmoduleReady(): Promise<void> {
+    const submoduleDir = join(ROOT, LIBAPPS_SUBMODULE_PATH);
+
+    if (!existsSync(submoduleDir) || !existsSync(join(submoduleDir, ".git"))) {
+        console.log("ensuring libapps submodule...");
+        execSync(`git -C "${ROOT}" submodule update --init --recursive ${LIBAPPS_SUBMODULE_PATH}`, { stdio: "inherit" });
+    }
+
+    execSync(`git -C "${ROOT}" submodule update --init --recursive ${LIBAPPS_SUBMODULE_PATH}`, { stdio: "inherit" });
+
+    if (!existsSync(join(submoduleDir, "hterm", "index.js"))) {
+        throw new Error("libapps submodule is present but hterm sources are missing");
+    }
 }
 
 function toPosix(p: string): string {
@@ -278,6 +304,113 @@ async function buildPackage(
                 await cp(typeFile, join(packageInstallDir, basename(typeFile)));
             }
             console.log(`  js: ${pkg.distName} (bundled esm entry)`);
+        } else if (pkg.distName === "hterm") {
+            const htermRoot = srcDir;
+            const htermPackageJson = JSON.parse(await readFile(join(htermRoot, "package.json"), "utf8")) as { version?: string };
+            const htermVersion = htermPackageJson.version ?? "0.0.0";
+            const gitCommitHash = execSync(`git -C "${join(ROOT, LIBAPPS_SUBMODULE_PATH)}" rev-parse --short HEAD`, { encoding: "utf8" }).trim();
+            const gitDate = execSync(`git -C "${join(ROOT, LIBAPPS_SUBMODULE_PATH)}" show -s --format=%cI HEAD`, { encoding: "utf8" }).trim();
+            const punycodeModulePathCandidates = [
+                join(ROOT, "node_modules/punycode/punycode.js"),
+                join(ROOT, LIBAPPS_SUBMODULE_PATH, "node_modules/punycode/punycode.js"),
+            ];
+            const punycodeModulePath = punycodeModulePathCandidates.find((candidate) => existsSync(candidate));
+            if (!punycodeModulePath) {
+                throw new Error("hterm build requires punycode. Install it in root or third_party/libapps node_modules.");
+            }
+
+            const packageJsonShimPlugin: esbuild.Plugin = {
+                name: "hterm-package-json-shim",
+                setup(build) {
+                    build.onResolve({ filter: /\.\.\/package\.json$/ }, (args) => ({
+                        path: join(args.resolveDir, "../package.json"),
+                        namespace: "hterm-pkg-json",
+                    }));
+                    build.onLoad({ filter: /.*/, namespace: "hterm-pkg-json" }, () => ({
+                        contents: [
+                            `export const version = ${JSON.stringify(htermVersion)};`,
+                            `export const gitCommitHash = ${JSON.stringify(gitCommitHash)};`,
+                            `export const gitDate = ${JSON.stringify(gitDate)};`,
+                        ].join("\n"),
+                        loader: "js",
+                    }));
+                },
+            };
+            const punycodeShimPlugin: esbuild.Plugin = {
+                name: "hterm-punycode-shim",
+                setup(build) {
+                    build.onResolve({ filter: /^punycode$/ }, () => ({ path: punycodeModulePath }));
+                },
+            };
+            const htermBuildArtifactAliasPlugin: esbuild.Plugin = {
+                name: "hterm-build-artifact-alias",
+                setup(build) {
+                    build.onResolve({ filter: /^\.\/dist\/js\/hterm_resources\.js$/ }, () => ({
+                        path: join(packageInstallDir, "dist/js/hterm_resources.js"),
+                    }));
+                    build.onResolve({ filter: /^\.\/deps_punycode\.rollup\.js$/ }, () => ({
+                        path: join(packageInstallDir, "js/deps_punycode.rollup.js"),
+                    }));
+                },
+            };
+
+            await esbuild.build({
+                entryPoints: [join(htermRoot, "js/deps_resources.shim.js")],
+                outfile: join(packageInstallDir, "dist/js/hterm_resources.js"),
+                format: "esm",
+                bundle: true,
+                platform: "browser",
+                target: "es2022",
+                minify: true,
+                sourcemap: true,
+                external: ["../../../libdot/index.js"],
+                loader: {
+                    ".html": "text",
+                    ".svg": "text",
+                    ".ogg": "dataurl",
+                    ".png": "dataurl",
+                },
+                plugins: [packageJsonShimPlugin],
+            });
+
+            await esbuild.build({
+                entryPoints: [join(htermRoot, "js/deps_punycode.shim.js")],
+                outfile: join(packageInstallDir, "js/deps_punycode.rollup.js"),
+                format: "esm",
+                bundle: true,
+                platform: "browser",
+                target: "es2022",
+                minify: true,
+                sourcemap: true,
+                plugins: [punycodeShimPlugin],
+            });
+
+            await esbuild.build({
+                entryPoints: [join(htermRoot, "index.js")],
+                outfile: join(packageInstallDir, "dist/js/hterm.js"),
+                format: "esm",
+                bundle: true,
+                platform: "browser",
+                target: "es2022",
+                minify: true,
+                sourcemap: true,
+                external: ["../../libdot/index.js", "../../../libdot/index.js"],
+                plugins: [htermBuildArtifactAliasPlugin],
+            });
+
+            const extraFiles: Array<[string, string]> = [
+                ["html/hterm.html", "html/hterm.html"],
+                ["README.md", "README.md"],
+                ["LICENSE", "LICENSE"],
+            ];
+            for (const [srcRel, destRel] of extraFiles) {
+                const srcPath = join(htermRoot, srcRel);
+                if (!existsSync(srcPath)) continue;
+                const destPath = join(packageInstallDir, destRel);
+                await ensureDir(dirname(destPath));
+                await cp(srcPath, destPath);
+            }
+            console.log(`  js: ${pkg.distName} (esbuild standalone bundle)`);
         } else {
         let tsFiles = (await collectFiles(srcDir, [".ts"]))
             .filter(f => !f.endsWith(".d.ts"));
@@ -409,6 +542,7 @@ async function createUpkPackage(
 await ensureDir(DIST);
 await rm(PACKAGES_DIR, { recursive: true, force: true });
 await ensureDir(PACKAGES_DIR);
+await ensureLibappsSubmoduleReady();
 
 const tempBuild = join(ROOT, ".upk-build");
 await rm(tempBuild, { recursive: true, force: true });

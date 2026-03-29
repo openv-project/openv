@@ -1,0 +1,17 @@
+{
+  "name": "hterm",
+  "version": "1.92.1-1",
+  "description": "A reasonably correct & fast terminal emulator.",
+  "license": "BSD-3-Clause",
+  "platform": "openv",
+  "packager": "Endercass <contact@endercass.me>",
+  "builddate": 0,
+  "urls": {
+    "homepage": "https://chromium.googlesource.com/apps/libapps/+/HEAD/hterm",
+    "git": "https://chromium.googlesource.com/apps/libapps/"
+  },
+  "depend": [
+    "party.openv.core"
+  ],
+  "upk-schema": "1"
+}
