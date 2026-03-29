@@ -54,6 +54,17 @@ export class DevFS implements FileSystemDevFsComponent {
     #openFiles = new Map<number, string>();
 
     constructor() {
+        const nullDevice: CharacterDeviceRegistration = {
+            type: "character",
+            mode: 0o666,
+            read: async () => new Uint8Array(0),
+            write: async (_ofd, buffer, offset, length) => {
+                const start = offset ?? 0;
+                const end = length !== undefined ? start + length : buffer.byteLength;
+                return Math.max(0, end - start);
+            },
+            ioctl: async (ofd, request, _argument) => defaultNoopIoctl(ofd, request),
+        };
         const zero: CharacterDeviceRegistration = {
             type: "character",
             mode: 0o666,
@@ -84,6 +95,7 @@ export class DevFS implements FileSystemDevFsComponent {
             ioctl: async (ofd, request, _argument) => defaultNoopIoctl(ofd, request),
         };
 
+        void this.registerCharacterDevice("/dev/null", nullDevice);
         void this.registerCharacterDevice("/dev/zero", zero);
         void this.registerCharacterDevice("/dev/random", randomLike);
         void this.registerCharacterDevice("/dev/urandom", randomLike);
