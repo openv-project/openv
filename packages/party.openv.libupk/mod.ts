@@ -1,6 +1,6 @@
 import type { API, OpEnv, FileSystemReadWriteComponent } from "@openv-project/openv-api";
 import type { InstallOptions, UninstallOptions, VerifyOptions } from "./types/options.js";
-import type { InstallResult, UninstallResult, VerifyResult, QueryResult, PackageInfo } from "./types/package.js";
+import type { InstallResult, UninstallResult, VerifyResult, QueryResult, PackageInfo, BatchInstallResult } from "./types/package.js";
 import type { FileSystemAdapter } from "./types/adapters.js";
 import { PackageManager } from "./core/manager.js";
 import { TarAdapter } from "./adapters/containers/tar.js";
@@ -112,6 +112,20 @@ export default class UpkApi implements API<"party.openv.libupk"> {
     return await manager.install(resolvedSource, options);
   }
 
+  async installBatch(sources: Array<string | Uint8Array>, options: InstallOptions = {}): Promise<BatchInstallResult> {
+    this.ensureInitialized();
+
+    const rootPath = options.rootPath ?? this.defaultRootPath;
+    const inMemoryDb = options.inMemoryDb ?? this.defaultInMemoryDb;
+    const dbPath = inMemoryDb ? null : (options.dbPath ?? this.defaultDbPath);
+
+    const manager = await this.getManager(rootPath, dbPath, inMemoryDb);
+    const resolvedSources = await Promise.all(
+      sources.map((source) => typeof source === "string" ? this.readPackageSource(source) : source)
+    );
+    return await manager.installBatch(resolvedSources, options);
+  }
+
   async uninstall(packageName: string, options: UninstallOptions = {}): Promise<UninstallResult> {
     this.ensureInitialized();
     
@@ -179,6 +193,11 @@ export default class UpkApi implements API<"party.openv.libupk"> {
 
   private createFileSystemAdapter(rootPath: string): FileSystemAdapter {
     const fs = this.openv.system;
+    const enosys = (operation: string): never => {
+      const error = new Error(`ENOSYS: ${operation} not implemented`) as Error & { code?: string };
+      error.code = "ENOSYS";
+      throw error;
+    };
     
     const joinWithRoot = (path: string): string => {
       const normalizedPath = path.startsWith("/") ? path : `/${path}`;
@@ -187,10 +206,51 @@ export default class UpkApi implements API<"party.openv.libupk"> {
       const relative = normalizedPath.replace(/^\/+/, "");
       return `${normalizedRoot}/${relative}`.replace(/\/+/g, "/");
     };
+    const normalizePath = (path: string): string => {
+      if (!path || path === "") return "/";
+      const withSlash = path.startsWith("/") ? path : `/${path}`;
+      if (withSlash === "/") return "/";
+      return withSlash.replace(/\/+/g, "/").replace(/\/+$/, "");
+    };
+    const parentPath = (path: string): string => {
+      const normalized = normalizePath(path);
+      if (normalized === "/") return "/";
+      const idx = normalized.lastIndexOf("/");
+      return idx <= 0 ? "/" : normalized.slice(0, idx);
+    };
+    const joinPath = (base: string, child: string): string => {
+      const left = normalizePath(base);
+      const right = child.replace(/^\/+/, "");
+      return normalizePath(`${left}/${right}`);
+    };
+    const resolveSymlinkedPath = async (path: string): Promise<string> => {
+      let current = normalizePath(path);
+      const parts = current.split("/").filter(Boolean);
+      let resolved = "/";
+      for (const part of parts) {
+        const candidate = joinPath(resolved, part);
+        let linkTarget: string | null = null;
+        try {
+          if (fs["party.openv.filesystem.read.readlink"]) {
+            linkTarget = await fs["party.openv.filesystem.read.readlink"](candidate);
+          }
+        } catch {
+          linkTarget = null;
+        }
+        if (linkTarget) {
+          resolved = linkTarget.startsWith("/")
+            ? normalizePath(linkTarget)
+            : joinPath(parentPath(candidate), linkTarget);
+          continue;
+        }
+        resolved = candidate;
+      }
+      return resolved;
+    };
 
     return {
       async writeFile(path: string, data: Uint8Array): Promise<void> {
-        const fullPath = joinWithRoot(path);
+        const fullPath = await resolveSymlinkedPath(joinWithRoot(path));
         const fd = await fs["party.openv.filesystem.open"](fullPath, "w", 0o644);
         try {
           await fs["party.openv.filesystem.write.write"]!(fd, data, 0, data.length, 0);
@@ -201,51 +261,74 @@ export default class UpkApi implements API<"party.openv.libupk"> {
 
       async mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<void> {
         const fullPath = joinWithRoot(path);
+        const isAlreadyExists = (error: unknown): boolean => {
+          if (!(error instanceof Error)) return false;
+          const code = (error as Error & { code?: unknown }).code;
+          if (code === "EEXIST") return true;
+          return error.message.toUpperCase().includes("EEXIST");
+        };
+        const ensureDirectoryExists = async (targetPath: string): Promise<boolean> => {
+          try {
+            const stat = await fs["party.openv.filesystem.read.stat"]!(targetPath);
+            return stat.type === "DIRECTORY";
+          } catch {
+            return false;
+          }
+        };
         if (options?.recursive) {
           const parts = fullPath.split("/").filter(p => p);
           let current = "";
           for (const part of parts) {
             current = current ? `${current}/${part}` : `/${part}`;
+            const resolvedCurrent = await resolveSymlinkedPath(current);
             try {
-              await fs["party.openv.filesystem.write.mkdir"]!(current, options.mode || 0o755);
-            } catch {
-              // Directory might already exist
+              await fs["party.openv.filesystem.write.mkdir"]!(resolvedCurrent, options.mode || 0o755);
+            } catch (error) {
+              if (!isAlreadyExists(error)) {
+                if (!await ensureDirectoryExists(resolvedCurrent)) {
+                  throw error;
+                }
+              }
             }
           }
         } else {
-          await fs["party.openv.filesystem.write.mkdir"]!(fullPath, options?.mode || 0o755);
+          const resolvedPath = await resolveSymlinkedPath(fullPath);
+          await fs["party.openv.filesystem.write.mkdir"]!(resolvedPath, options?.mode || 0o755);
         }
       },
 
       async symlink(target: string, path: string): Promise<void> {
-        const fullPath = joinWithRoot(path);
+        const fullPath = await resolveSymlinkedPath(joinWithRoot(path));
         const symlink = fs["party.openv.filesystem.write.symlink"];
         if (!symlink) {
-          throw new Error("Filesystem symlink is not supported");
+          enosys("symlink");
+          return;
         }
         await symlink(target, fullPath, 0o777);
       },
 
       async chmod(path: string, mode: number): Promise<void> {
-        const fullPath = joinWithRoot(path);
+        const fullPath = await resolveSymlinkedPath(joinWithRoot(path));
         const chmod = fs["party.openv.filesystem.write.chmod"];
         if (!chmod) {
-          throw new Error("Filesystem chmod is not supported");
+          enosys("chmod");
+          return;
         }
         await chmod(fullPath, mode);
       },
 
       async chown(path: string, uid: number, gid: number): Promise<void> {
-        const fullPath = joinWithRoot(path);
+        const fullPath = await resolveSymlinkedPath(joinWithRoot(path));
         const chown = fs["party.openv.filesystem.write.chown"];
         if (!chown) {
-          throw new Error("Filesystem chown is not supported");
+          enosys("chown");
+          return;
         }
         await chown(fullPath, uid, gid);
       },
 
       async stat(path: string): Promise<{ size: number; mode: number; mtime: Date }> {
-        const fullPath = joinWithRoot(path);
+        const fullPath = await resolveSymlinkedPath(joinWithRoot(path));
         const stat = await fs["party.openv.filesystem.read.stat"]!(fullPath);
         return {
           size: stat.size,
@@ -255,7 +338,7 @@ export default class UpkApi implements API<"party.openv.libupk"> {
       },
 
       async exists(path: string): Promise<boolean> {
-        const fullPath = joinWithRoot(path);
+        const fullPath = await resolveSymlinkedPath(joinWithRoot(path));
         try {
           await fs["party.openv.filesystem.read.stat"]!(fullPath);
           return true;
@@ -265,7 +348,7 @@ export default class UpkApi implements API<"party.openv.libupk"> {
       },
 
       async readFile(path: string): Promise<Uint8Array> {
-        const fullPath = joinWithRoot(path);
+        const fullPath = await resolveSymlinkedPath(joinWithRoot(path));
         const stat = await fs["party.openv.filesystem.read.stat"]!(fullPath);
         const fd = await fs["party.openv.filesystem.open"](fullPath, "r", 0o444);
         try {
@@ -276,17 +359,17 @@ export default class UpkApi implements API<"party.openv.libupk"> {
       },
 
       async unlink(path: string): Promise<void> {
-        const fullPath = joinWithRoot(path);
+        const fullPath = await resolveSymlinkedPath(joinWithRoot(path));
         await fs["party.openv.filesystem.write.unlink"]!(fullPath);
       },
 
       async rmdir(path: string): Promise<void> {
-        const fullPath = joinWithRoot(path);
+        const fullPath = await resolveSymlinkedPath(joinWithRoot(path));
         await fs["party.openv.filesystem.write.rmdir"]!(fullPath);
       },
 
       async readdir(path: string): Promise<string[]> {
-        const fullPath = joinWithRoot(path);
+        const fullPath = await resolveSymlinkedPath(joinWithRoot(path));
         return await fs["party.openv.filesystem.read.readdir"]!(fullPath);
       },
     };

@@ -308,7 +308,7 @@ export class OPFS {
 	}
 
 	async stat(path: string): Promise<FsStats<typeof OPFS_NAMESPACE>> {
-		return this.#statInternal(path, false);
+		return this.#statInternal(path, true);
 	}
 
 	async lstat(path: string): Promise<FsStats<typeof OPFS_NAMESPACE>> {
@@ -857,7 +857,7 @@ export class OPFS {
 		return { mount, mountState, relativePath: rel };
 	}
 
-	async #getDirectoryHandleByRelativePath(mount: string, relativePath: string): Promise<FileSystemDirectoryHandle> {
+	async #getDirectoryHandleByRelativePath(mount: string, relativePath: string, symlinkHops: number = 0): Promise<FileSystemDirectoryHandle> {
 		const mountState = this.#mountStates.get(mount);
 		if (!mountState) {
 			throw new Error(`ENOENT: mount path not found '${mount}'`);
@@ -873,12 +873,33 @@ export class OPFS {
 		}
 
 		let current = mountState.rootHandle;
-		try {
-			for (const part of splitPath(relativePath)) {
-				current = await current.getDirectoryHandle(marshalName(part));
+		let resolvedPrefix = "/";
+		const remaining = [...splitPath(relativePath)];
+		while (remaining.length > 0) {
+			const part = remaining.shift()!;
+			const wireName = marshalName(part);
+			const childDir = await this.#tryGetDirectoryHandle(current, wireName);
+			if (childDir) {
+				current = childDir;
+				resolvedPrefix = normalizePath(`${resolvedPrefix}/${part}`);
+				continue;
 			}
-		} catch (err) {
-			// Convert FileSystemAPI errors to ENOENT
+
+			const attrs = await this.#readAttrs(current);
+			const attr = attrs[wireName];
+			if (attr?.type === "SYMLINK" && typeof attr.target === "string") {
+				const nextHops = symlinkHops + 1;
+				if (nextHops > 40) {
+					throw new Error(`ELOOP: too many levels of symbolic links, stat '${relativePath}'`);
+				}
+				const targetPath = attr.target.startsWith("/")
+					? normalizePath(attr.target)
+					: normalizePath(`${resolvedPrefix}/${attr.target}`);
+				const suffix = remaining.length > 0 ? `/${remaining.join("/")}` : "";
+				const redirected = normalizePath(`${targetPath}${suffix}`);
+				return await this.#getDirectoryHandleByRelativePath(mount, redirected, nextHops);
+			}
+
 			throw new Error(`ENOENT: no such file or directory, stat '${relativePath}'`);
 		}
 		mountState.dirCache.set(cacheKey, current);
@@ -997,12 +1018,18 @@ export class OPFS {
 		const parentDir = await this.#getDirectoryHandleByRelativePath(mount, parentRel);
 		const wireName = marshalName(seg);
 		const attrs = await this.#readAttrs(parentDir);
-		const prev = attrs[wireName] ?? defaultEntry("DIRECTORY", 0o777);
+		const prev = attrs[wireName];
+		if (prev && prev.type !== "DIRECTORY") {
+			// Path aliases through symlinks (e.g. /lib -> /usr/lib) may route directory
+			// updates through a symlink name. Never coerce a symlink entry into a directory.
+			return;
+		}
+		const base = prev ?? defaultEntry("DIRECTORY", 0o777);
 		attrs[wireName] = {
-			...prev,
+			...base,
 			type: "DIRECTORY",
 			mtime: nowMs(),
-			atime: prev.atime,
+			atime: base.atime,
 		};
 		await this.#writeAttrs(parentDir, attrs);
 	}

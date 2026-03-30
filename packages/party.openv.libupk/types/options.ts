@@ -6,6 +6,7 @@ export interface InstallOptions {
   logger?: LoggingAdapter;
   skipDependencies?: boolean;
   asDeps?: boolean;
+  batchSequential?: boolean;
   rootPath?: string;
   dbPath?: string;
   inMemoryDb?: boolean;

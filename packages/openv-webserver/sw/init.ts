@@ -109,7 +109,6 @@ export async function ensureInitialized(): Promise<void> {
         await hydrateSystemRegistryFromIdb(coreRegistry, coreFs);
         await scaffoldRegistry();
         await applyFsMountsFromRegistry();
-        await scaffoldBootDirectory();
         await syncSystemRegistryToIdb(coreRegistry, coreFs);
         await startSystemRegistryPersistence(coreRegistry, coreFs);
         await applyBridgeConfig();
@@ -258,13 +257,5 @@ async function applyFsMountsFromRegistry(): Promise<void> {
             if (message.includes("already") || message.includes("occupied")) continue;
             throw err;
         }
-    }
-}
-
-async function scaffoldBootDirectory(): Promise<void> {
-    try {
-        await coreFs["party.openv.filesystem.write.mkdir"]("/boot", 0o755);
-    } catch {
-        // Directory may already exist
     }
 }

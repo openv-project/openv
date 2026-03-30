@@ -7,6 +7,7 @@ import { execSync } from "node:child_process";
 import { createTar, type TarFileAttrs, type TarFileInput } from "nanotar";
 import { gzipSync } from "fflate";
 import { importRewriter } from "./import-rewriter.ts";
+import filesystemLayout from "../packages/filesystem/layout.json" with { type: "json" };
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const DIST = join(ROOT, "dist");
@@ -24,6 +25,26 @@ type Stage0Meta = {
     symlink?: string;
 };
 
+type FilesystemLayoutFile = {
+    path: string;
+    content: string;
+    mode?: number;
+};
+
+type FilesystemLayoutSymlink = {
+    path: string;
+    target: string;
+    mode?: number;
+};
+
+type FilesystemLayout = {
+    name: string;
+    version: string;
+    directories: string[];
+    files: FilesystemLayoutFile[];
+    symlinks: FilesystemLayoutSymlink[];
+};
+
 type PackageConfig = {
     src: string;
     installPath: string;
@@ -37,6 +58,26 @@ type PackageConfig = {
 };
 
 const PACKAGES: PackageConfig[] = [
+    {
+        src: "packages/base",
+        installPath: "/",
+        distName: "base",
+        buildUpk: true,
+        manifestPath: "packages/base/.manifest",
+        bootstrapSelectable: true,
+        bootstrapDefaultSelected: true,
+        bootstrapLabel: "Base Meta"
+    },
+    {
+        src: "packages/filesystem",
+        installPath: "/",
+        distName: "filesystem",
+        buildUpk: true,
+        manifestPath: "packages/filesystem/.manifest",
+        bootstrapSelectable: true,
+        bootstrapDefaultSelected: true,
+        bootstrapLabel: "Filesystem Layout"
+    },
     { 
         src: "packages/openv-core", 
         installPath: "/lib/openv/openv-core", 
@@ -202,6 +243,89 @@ function tarAttrs(meta: Stage0Meta | undefined, fallbackMode: number): TarFileAt
     };
 }
 
+function normalizeLayoutPath(path: string): string {
+    const normalized = toPosix(path).replace(/\/+/g, "/");
+    const withLeadingSlash = normalized.startsWith("/") ? normalized : `/${normalized}`;
+    return withLeadingSlash === "/" ? "/" : withLeadingSlash.replace(/\/+$/, "");
+}
+
+function toMtreePath(path: string): string {
+    const normalized = normalizeLayoutPath(path);
+    return normalized === "/" ? "." : normalized.slice(1);
+}
+
+async function buildFilesystemLayoutPackage(packageBuildDir: string): Promise<void> {
+    const layout = filesystemLayout as FilesystemLayout;
+    const textEncoder = new TextEncoder();
+
+    const dirEntries = new Set<string>();
+    const fileEntries = new Map<string, { content: string; mode: number }>();
+    const symlinkEntries = new Map<string, { target: string; mode: number }>();
+
+    const addDirectoryChain = (path: string): void => {
+        let current = normalizeLayoutPath(path);
+        while (current !== "/") {
+            dirEntries.add(current);
+            const parent = dirname(current);
+            if (parent === current) break;
+            current = parent === "." ? "/" : normalizeLayoutPath(parent);
+        }
+    };
+
+    for (const directory of layout.directories) {
+        addDirectoryChain(directory);
+    }
+
+    for (const file of layout.files) {
+        const filePath = normalizeLayoutPath(file.path);
+        addDirectoryChain(dirname(filePath));
+        fileEntries.set(filePath, {
+            content: file.content,
+            mode: file.mode ?? DEFAULT_FILE_MODE,
+        });
+    }
+
+    for (const symlink of layout.symlinks) {
+        const linkPath = normalizeLayoutPath(symlink.path);
+        addDirectoryChain(dirname(linkPath));
+        symlinkEntries.set(linkPath, {
+            target: symlink.target,
+            mode: symlink.mode ?? 0o777,
+        });
+    }
+
+    for (const [filePath, file] of fileEntries.entries()) {
+        const relPath = filePath.slice(1);
+        const outputPath = join(packageBuildDir, relPath);
+        await ensureDir(dirname(outputPath));
+        await writeFile(outputPath, file.content, "utf8");
+        await applyFsAttrs(outputPath, { mode: file.mode, uid: ROOT_UID, gid: ROOT_GID }, DEFAULT_FILE_MODE);
+    }
+
+    const mtreeLines = [
+        "#mtree",
+        "/set uid=0 gid=0",
+    ];
+
+    const sortedDirectories = Array.from(dirEntries).sort((a, b) => a.localeCompare(b));
+    for (const directory of sortedDirectories) {
+        mtreeLines.push(`./${toMtreePath(directory)} type=dir mode=0755`);
+    }
+
+    const sortedFiles = Array.from(fileEntries.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    for (const [filePath, file] of sortedFiles) {
+        const size = textEncoder.encode(file.content).byteLength;
+        mtreeLines.push(`./${toMtreePath(filePath)} type=file mode=${modeToOctalString(file.mode, DEFAULT_FILE_MODE)} size=${size}`);
+    }
+
+    const sortedSymlinks = Array.from(symlinkEntries.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    for (const [linkPath, symlink] of sortedSymlinks) {
+        mtreeLines.push(`./${toMtreePath(linkPath)} type=link mode=${modeToOctalString(symlink.mode, 0o777)} link=${symlink.target}`);
+    }
+
+    await writeFile(join(packageBuildDir, ".MTREE"), `${mtreeLines.join("\n")}\n`, "utf8");
+}
+
 async function collectFiles(dir: string, exts: string[]): Promise<string[]> {
     const results: string[] = [];
     for (const entry of await readdir(dir, { withFileTypes: true, recursive: true })) {
@@ -269,7 +393,10 @@ async function buildPackage(
     await ensureDir(packageInstallDir);
 
     if (!pkg.typesOnly) {
-        if (pkg.distName === "fflate") {
+        if (pkg.distName === "filesystem") {
+            await buildFilesystemLayoutPackage(packageBuildDir);
+            console.log(`  layout: ${pkg.distName} (mtree + files)`);
+        } else if (pkg.distName === "fflate") {
             await esbuild.build({
                 entryPoints: [join(srcDir, "browser.js")],
                 outfile: join(packageInstallDir, "index.mjs"),

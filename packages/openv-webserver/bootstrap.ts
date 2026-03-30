@@ -1,6 +1,7 @@
 import UpkApi from "@openv-project/libupk";
 import { OpEnv } from "@openv-project/openv-api";
 import { ClientOpEnv, createPostMessageTransport } from "@openv-project/openv-core";
+import type { LoggingAdapter } from "@openv-project/libupk";
 
 const BOOTSTRAP_KEY = "/system/party/openv/bootstrap" as const;
 const BOOTSTRAP_PACKAGE_LIST_PATH = "/packages/bootstrap-packages.json" as const;
@@ -231,34 +232,52 @@ async function installSelected(openv: OpEnv<any>, selectedPackagePaths: string[]
     setProgress(0, packageQueue.length);
     appendLog(`Selected ${packageQueue.length} package(s): ${packageQueue.join(", ")}`);
 
-    let completedPackages = 0;
-    const installResults = await Promise.all(
+    const packageData = await Promise.all(
         packageQueue.map(async (packagePath) => {
             renderStatus(`Fetching ${packagePath}...`);
             appendLog(`Fetching ${packagePath}`);
-
             const packageRes = await fetch(packagePath);
             if (!packageRes.ok) {
                 throw new Error(`Failed to fetch ${packagePath}: ${packageRes.status}`);
             }
-
             appendLog(`Fetched ${packagePath} (${packageRes.status})`);
-            renderStatus(`Installing ${packagePath}...`);
-            appendLog(`Installing ${packagePath}`);
+            return new Uint8Array(await packageRes.arrayBuffer());
+        }),
+    );
 
-            const packageData = new Uint8Array(await packageRes.arrayBuffer());
-            const result = await upk.install(packageData, { overwrite: true });
-            if (result.status === "failed") {
-                throw new Error(result.message ?? `UPK install failed for ${packagePath}`);
-            }
-
+    renderStatus("Resolving dependencies and installing packages...");
+    appendLog("Resolving dependencies and building install phases.");
+    const upkLogger: LoggingAdapter = {
+        debug(message: string, ...args: any[]) {
+            appendLog(`UPK debug: ${[message, ...args].map((x) => String(x)).join(" ")}`);
+        },
+        info(message: string, ...args: any[]) {
+            appendLog(`UPK: ${[message, ...args].map((x) => String(x)).join(" ")}`);
+        },
+        warn(message: string, ...args: any[]) {
+            appendLog(`UPK warn: ${[message, ...args].map((x) => String(x)).join(" ")}`);
+        },
+        error(message: string, ...args: any[]) {
+            appendLog(`UPK error: ${[message, ...args].map((x) => String(x)).join(" ")}`);
+        },
+    };
+    const batchResult = await upk.installBatch(packageData, {
+        overwrite: true,
+        logger: upkLogger,
+    });
+    const installResults = batchResult.results;
+    if (installResults.length !== packageQueue.length) {
+        throw new Error(`Install result mismatch: expected ${packageQueue.length}, got ${installResults.length}`);
+    }
+    let completedPackages = 0;
+    for (const phase of batchResult.phases) {
+        appendLog(`Installing phase: ${phase.packages.join(", ")}`);
+        for (const result of phase.results) {
             completedPackages += 1;
             setProgress(completedPackages, packageQueue.length);
             appendLog(`Installed ${result.packageName}: ${result.filesInstalled} file(s)`);
-
-            return result;
-        })
-    );
+        }
+    }
 
     const installedPackages = installResults.map((result) => result.packageName);
     const totalFiles = installResults.reduce((sum, result) => sum + result.filesInstalled, 0);

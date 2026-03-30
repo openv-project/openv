@@ -10,6 +10,9 @@
         "homepage": "https://openv.party",
         "git": "https://github.com/openv-project/openv"
     },
+    "depend": [
+        "filesystem"
+    ],
     "provides": [
         "party.openv.api", 
         "party.openv.filesystem", 

@@ -30,6 +30,9 @@ type VFS = {
 
 const CORE_FS_EXT_NAMESPACE = "party.openv.impl.filesystem" as const;
 const CORE_FS_EXT_NAMESPACE_VERSIONED = "party.openv.impl.filesystem/0.1.0" as const;
+function enosys(operation: string): never {
+    throw new Error(`ENOSYS: ${operation} not implemented`);
+}
 
 /**
  * Internal extensions for linking with ProcessScopedFS
@@ -74,6 +77,14 @@ export interface CoreFSExt extends SystemComponent<typeof CORE_FS_EXT_NAMESPACE_
 }
 
 export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemPipeComponent, FileSystemSocketComponent, FileSystemIoctlComponent, FileSystemSyncComponent, CoreFSExt {
+    #traceSymlinkDebug = false;
+    #trace(...parts: unknown[]): void {
+        if (!this.#traceSymlinkDebug) return;
+        console.debug("[corefs:symlink-trace]", ...parts);
+    }
+    async ["party.openv.impl.filesystem.setSymlinkTraceEnabled"](enabled: boolean): Promise<void> {
+        this.#traceSymlinkDebug = !!enabled;
+    }
     async ["party.openv.filesystem.ioctl.ioctl"](ofd: number, request: string, argument?: PlainParameter): Promise<PlainParameter> {
         const entry = this.#ofdTable.get(ofd);
         if (!entry) throw new Error(`Invalid open file number ${ofd}`);
@@ -108,7 +119,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.create) {
-            throw new Error(`Virtual filesystem "${id}" does not implement create.`);
+            enosys(`virtual filesystem "${id}" create`);
         }
         return provider.create(path, mode);
     }
@@ -460,7 +471,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.mkdir) {
-            throw new Error(`Virtual filesystem "${id}" does not implement mkdir.`);
+            enosys(`virtual filesystem "${id}" mkdir`);
         }
         return provider.mkdir(path, mode);
     }
@@ -473,7 +484,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.rmdir) {
-            throw new Error(`Virtual filesystem "${id}" does not implement rmdir.`);
+            enosys(`virtual filesystem "${id}" rmdir`);
         }
         return provider.rmdir(path);
     }
@@ -520,7 +531,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         }
         const provider = this.#vfsTable.get(rOld.id);
         if (!provider || !provider.rename) {
-            throw new Error(`Virtual filesystem "${rOld.id}" does not implement rename.`);
+            enosys(`virtual filesystem "${rOld.id}" rename`);
         }
         return provider.rename(oldPath, newPath);
     }
@@ -556,7 +567,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.unlink) {
-            throw new Error(`Virtual filesystem "${id}" does not implement unlink.`);
+            enosys(`virtual filesystem "${id}" unlink`);
         }
         return provider.unlink(path);
     }
@@ -573,7 +584,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.symlink) {
-            throw new Error(`Virtual filesystem "${id}" does not implement symlink.`);
+            enosys(`virtual filesystem "${id}" symlink`);
         }
         return provider.symlink(target, path, mode);
     }
@@ -607,7 +618,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.chmod) {
-            throw new Error(`Virtual filesystem "${id}" does not implement chmod.`);
+            enosys(`virtual filesystem "${id}" chmod`);
         }
         return provider.chmod(path, mode);
     }
@@ -643,7 +654,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.chown) {
-            throw new Error(`Virtual filesystem "${id}" does not implement chown.`);
+            enosys(`virtual filesystem "${id}" chown`);
         }
         return provider.chown(path, uid, gid);
     }
@@ -657,20 +668,23 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     }
 
     async ["party.openv.filesystem.read.readlink"](path: string): Promise<string> {
-        const resolved = this.#resolveMountPath(path);
+        const normalized = this.#normalizePath(path);
+        const effectivePath = await this.#resolvePathSymlinkPrefixes(normalized);
+        const resolved = this.#resolveMountPath(effectivePath);
         if (!resolved) {
-            throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
+            throw new Error(`No mountpoint found for path "${effectivePath}". Use mount to attach a virtual filesystem.`);
         }
         const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.readlink) {
-            throw new Error(`Virtual filesystem "${id}" does not implement readlink.`);
+            enosys(`virtual filesystem "${id}" readlink`);
         }
-        return provider.readlink(path);
+        return provider.readlink(effectivePath);
     }
 
     async #statResolved(path: string, followSymlinks: boolean, seen: Set<string> = new Set()): Promise<FsStats> {
         const normalized = this.#normalizePath(path);
+        const effectivePath = followSymlinks ? await this.#resolvePathSymlinkPrefixes(normalized) : normalized;
         const fifoId = this.#fifoByPath.get(normalized);
         if (fifoId !== undefined) {
             const fifo = this.#fifoTable.get(fifoId);
@@ -713,32 +727,78 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             };
         }
 
-        const resolved = this.#resolveMountPath(path);
+        const resolved = this.#resolveMountPath(effectivePath);
         if (!resolved) {
-            throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
+            throw new Error(`No mountpoint found for path "${effectivePath}". Use mount to attach a virtual filesystem.`);
         }
         const { id } = resolved;
+        this.#trace("statResolved:start", { path, normalized, effectivePath, followSymlinks, mountId: id });
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.stat) {
-            throw new Error(`Virtual filesystem "${id}" does not implement stat.`);
+            enosys(`virtual filesystem "${id}" stat`);
         }
         if (!followSymlinks && provider.lstat) {
-            return provider.lstat(path);
+            this.#trace("statResolved:lstat-direct", { path, mountId: id });
+            return provider.lstat(effectivePath);
         }
-        const direct = await provider.stat(path);
+        const isEnoent = (error: unknown): boolean => {
+            const message = error instanceof Error ? error.message : String(error);
+            return message.includes("ENOENT");
+        };
+        let direct: FsStats;
+        try {
+            direct = await provider.stat(effectivePath);
+            this.#trace("statResolved:provider-stat", { path, effectivePath, mountId: id, type: direct.type, node: direct.node });
+        } catch (error) {
+            this.#trace("statResolved:provider-stat-error", { path, effectivePath, mountId: id, error: error instanceof Error ? error.message : String(error) });
+            if (followSymlinks && isEnoent(error) && provider.readlink) {
+                const target = await provider.readlink(effectivePath).catch(() => null);
+                this.#trace("statResolved:readlink-after-enoent", { path, effectivePath, mountId: id, target });
+                if (target) {
+                    const resolvedPath = this.#resolveSymlinkTarget(effectivePath, target);
+                    this.#trace("statResolved:follow-after-enoent", { path, effectivePath, target, resolvedPath });
+                    if (resolvedPath === normalized || seen.has(resolvedPath)) {
+                        throw new Error(`ELOOP: too many levels of symbolic links, stat '${normalized}'`);
+                    }
+                    seen.add(resolvedPath);
+                    try {
+                        return await this.#statResolved(resolvedPath, true, seen);
+                    } catch (targetError) {
+                        this.#trace("statResolved:follow-after-enoent-error", { path, resolvedPath, error: targetError instanceof Error ? targetError.message : String(targetError) });
+                        if (isEnoent(targetError) && provider.lstat) {
+                            this.#trace("statResolved:lstat-fallback-after-enoent", { path, mountId: id });
+                            return provider.lstat(effectivePath);
+                        }
+                        throw targetError;
+                    }
+                }
+            }
+            throw error;
+        }
         if (!followSymlinks || direct.type !== "SYMLINK") {
             return direct;
         }
-        const target = provider.readlink ? await provider.readlink(path) : null;
+        const target = provider.readlink ? await provider.readlink(effectivePath) : null;
+        this.#trace("statResolved:readlink", { path, effectivePath, mountId: id, target });
         if (!target) {
             return direct;
         }
-        const resolvedPath = this.#resolveSymlinkTarget(normalized, target);
+        const resolvedPath = this.#resolveSymlinkTarget(effectivePath, target);
+        this.#trace("statResolved:follow", { path, effectivePath, target, resolvedPath });
         if (resolvedPath === normalized || seen.has(resolvedPath)) {
             throw new Error(`ELOOP: too many levels of symbolic links, stat '${normalized}'`);
         }
         seen.add(resolvedPath);
-        return this.#statResolved(resolvedPath, true, seen);
+        try {
+            return await this.#statResolved(resolvedPath, true, seen);
+        } catch (error) {
+            this.#trace("statResolved:follow-error", { path, resolvedPath, error: error instanceof Error ? error.message : String(error) });
+            if (isEnoent(error) && provider.lstat) {
+                this.#trace("statResolved:lstat-fallback-after-follow-error", { path, mountId: id });
+                return provider.lstat(effectivePath);
+            }
+            throw error;
+        }
     }
 
     async ["party.openv.filesystem.read.read"](ofd: number, length: number, position?: number): Promise<Uint8Array> {
@@ -776,17 +836,18 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
 
     async ["party.openv.filesystem.read.readdir"](path: string): Promise<string[]> {
         const normalized = this.#normalizePath(path);
-        const resolved = this.#resolveMountPath(path);
+        const effectivePath = await this.#resolvePathSymlinkPrefixes(normalized);
+        const resolved = this.#resolveMountPath(effectivePath);
         if (!resolved) {
-            throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
+            throw new Error(`No mountpoint found for path "${effectivePath}". Use mount to attach a virtual filesystem.`);
         }
         const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.readdir) {
-            throw new Error(`Virtual filesystem "${id}" does not implement readdir.`);
+            enosys(`virtual filesystem "${id}" readdir`);
         }
 
-        const baseEntries = await provider.readdir(path);
+        const baseEntries = await provider.readdir(effectivePath);
         const merged = new Set(baseEntries);
 
         const parentOf = (fullPath: string): string => {
@@ -823,16 +884,18 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     }
 
     async ["party.openv.filesystem.read.watch"](path: string, options?: { recursive?: boolean; }): Promise<{ events: AsyncIterable<FileSystemEvent>; abort: () => Promise<void>; }> {
-        const resolved = this.#resolveMountPath(path);
+        const normalized = this.#normalizePath(path);
+        const effectivePath = await this.#resolvePathSymlinkPrefixes(normalized);
+        const resolved = this.#resolveMountPath(effectivePath);
         if (!resolved) {
-            throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
+            throw new Error(`No mountpoint found for path "${effectivePath}". Use mount to attach a virtual filesystem.`);
         }
         const { id } = resolved;
         const provider = this.#vfsTable.get(id);
         if (!provider || !provider.watch) {
-            throw new Error(`Virtual filesystem "${id}" does not implement watch.`);
+            enosys(`virtual filesystem "${id}" watch`);
         }
-        return provider.watch(path, options);
+        return provider.watch(effectivePath, options);
     }
     // Global open file table. Each entry is an "open file description" (ofd), analogous
     // to the Linux open file table. Process-local file descriptors point into this table.
@@ -870,7 +933,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             throw new Error(`Virtual filesystem "${id}" does not exist.`);
         }
         if (!provider.open) {
-            throw new Error(`Virtual filesystem "${id}" does not implement open.`);
+            enosys(`virtual filesystem "${id}" open`);
         }
 
         const providerOpen = provider.open!;
@@ -1543,9 +1606,39 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         return this.#normalizePath(`${base}/${target}`);
     }
 
+    async #resolvePathSymlinkPrefixes(path: string, maxDepth = 32): Promise<string> {
+        let current = this.#normalizePath(path);
+        for (let depth = 0; depth < maxDepth; depth++) {
+            const parts = current.split("/").filter(Boolean);
+            let changed = false;
+            for (let i = 0; i < parts.length; i++) {
+                const prefix = "/" + parts.slice(0, i + 1).join("/");
+                const resolved = this.#resolveMountPath(prefix);
+                if (!resolved) continue;
+                const provider = this.#vfsTable.get(resolved.id);
+                if (!provider || !provider.lstat || !provider.readlink) continue;
+                try {
+                    const prefixStat = await provider.lstat(prefix);
+                    if (prefixStat.type !== "SYMLINK") continue;
+                    const target = await provider.readlink(prefix);
+                    const suffix = parts.slice(i + 1).join("/");
+                    const resolvedPrefix = this.#resolveSymlinkTarget(prefix, target);
+                    current = suffix ? this.#normalizePath(`${resolvedPrefix}/${suffix}`) : resolvedPrefix;
+                    changed = true;
+                    break;
+                } catch {
+                    continue;
+                }
+            }
+            if (!changed) return current;
+        }
+        throw new Error(`ELOOP: too many levels of symbolic links, resolve '${path}'`);
+    }
+
     async #resolvePathWithSymlinks(path: string, maxDepth = 16): Promise<string> {
         let current = this.#normalizePath(path);
         for (let i = 0; i < maxDepth; i++) {
+            current = await this.#resolvePathSymlinkPrefixes(current);
             const resolved = this.#resolveMountPath(current);
             if (!resolved) return current;
             const provider = this.#vfsTable.get(resolved.id);

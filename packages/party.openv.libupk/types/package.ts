@@ -30,6 +30,16 @@ export interface InstallResult {
   message?: string;
 }
 
+export interface BatchInstallPhaseResult {
+  packages: string[];
+  results: InstallResult[];
+}
+
+export interface BatchInstallResult {
+  phases: BatchInstallPhaseResult[];
+  results: InstallResult[];
+}
+
 export interface UninstallResult {
   packageName: string;
   filesRemoved: number;

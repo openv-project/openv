@@ -1,0 +1,10 @@
+{
+  "name": "filesystem",
+  "version": "0.1.0-1",
+  "description": "Base OpEnv Filesystem",
+  "license": "MIT",
+  "platform": "openv",
+  "packager": "Endercass <contact@endercass.me>",
+  "builddate": 0,
+  "upk-schema": "1"
+}
