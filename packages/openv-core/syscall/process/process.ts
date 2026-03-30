@@ -1,4 +1,4 @@
-import type { PROCESS_LOCAL_NAMESPACE, PROCESS_LOCAL_NAMESPACE_VERSIONED, PROCESS_NAMESPACE, PROCESS_NAMESPACE_VERSIONED, PROCESS_SIGNAL_NOTIFYEXIT, SystemComponent, ProcessComponent, ProcessExecutorInfo, ProcessLocalComponent, ProcessSpawnOptions, SpawnStdioResult, StdioOption } from "@openv-project/openv-api";
+import type { FileSystemCoreComponent, FileSystemReadOnlyComponent, PROCESS_BINFMT_NAMESPACE, PROCESS_BINFMT_NAMESPACE_VERSIONED, PROCESS_LOCAL_NAMESPACE, PROCESS_LOCAL_NAMESPACE_VERSIONED, PROCESS_NAMESPACE, PROCESS_NAMESPACE_VERSIONED, PROCESS_SIGNAL_NOTIFYEXIT, SystemComponent, ProcessBinfmtComponent, ProcessBinfmtMatchResult, ProcessBinfmtRule, ProcessComponent, ProcessExecutorInfo, ProcessLocalComponent, ProcessSpawnOptions, SpawnStdioResult, StdioOption } from "@openv-project/openv-api";
 import type { CoreFSExt } from "../fs.ts";
 
 type SignalHandler = (cx: { signal: string; uid: number; gid: number; pid: number }) => Promise<void>;
@@ -77,16 +77,154 @@ export interface CoreProcessExt extends SystemComponent<typeof CORE_PROCESS_EXT_
 }
 
 
-export class CoreProcess implements ProcessComponent, CoreProcessExt {
+export class CoreProcess implements ProcessComponent, ProcessBinfmtComponent, CoreProcessExt {
     #pidCounter = 0;
     #processTable: Map<number, ProcessEntry> = new Map();
-    #fsExt: CoreFSExt | null = null;
+    #fsExt: (CoreFSExt & FileSystemCoreComponent & FileSystemReadOnlyComponent) | null = null;
     #stdioResults: Map<number, SpawnStdioResult> = new Map();
     #executors: Map<string, RegisteredExecutor> = new Map();
     #spawnQueue: PendingSpawn[] = [];
+    #binfmtRules: Map<string, ProcessBinfmtRule> = new Map();
 
-    setFsExt(fsExt: CoreFSExt): void {
+    setFsExt(fsExt: CoreFSExt & FileSystemCoreComponent & FileSystemReadOnlyComponent): void {
         this.#fsExt = fsExt;
+    }
+
+    #validateBinfmtRule(rule: ProcessBinfmtRule): ProcessBinfmtRule {
+        if (!rule.name || rule.name.includes("/")) {
+            throw new Error(`EINVAL: invalid binfmt rule name '${rule.name}'`);
+        }
+        if (!rule.interpreter || !rule.interpreter.startsWith("/")) {
+            throw new Error(`EINVAL: interpreter must be an absolute path`);
+        }
+        if (rule.type !== "magic" && rule.type !== "extension") {
+            throw new Error(`EINVAL: unsupported binfmt type '${(rule as any).type}'`);
+        }
+        const normalized: ProcessBinfmtRule = {
+            ...rule,
+            enabled: rule.enabled ?? true,
+            priority: rule.priority ?? 0,
+            flags: {
+                preserveArgv0: !!rule.flags?.preserveArgv0,
+                openBinary: !!rule.flags?.openBinary,
+            },
+        };
+
+        if (normalized.type === "extension") {
+            if (!normalized.extension || normalized.extension.includes("/") || normalized.extension.includes(".")) {
+                throw new Error(`EINVAL: extension rule requires extension without '.' or '/'`);
+            }
+        } else {
+            if (!normalized.magic || normalized.magic.length === 0) {
+                throw new Error(`EINVAL: magic rule requires non-empty magic bytes`);
+            }
+            const offset = normalized.offset ?? 0;
+            if (offset < 0) {
+                throw new Error(`EINVAL: magic rule offset must be >= 0`);
+            }
+            normalized.offset = offset;
+            if (normalized.mask && normalized.mask.length !== normalized.magic.length) {
+                throw new Error(`EINVAL: mask length must equal magic length`);
+            }
+        }
+        return normalized;
+    }
+
+    async ["party.openv.process.binfmt.register"](rule: ProcessBinfmtRule): Promise<void> {
+        const normalized = this.#validateBinfmtRule(rule);
+        this.#binfmtRules.set(normalized.name, normalized);
+    }
+
+    async ["party.openv.process.binfmt.unregister"](name: string): Promise<void> {
+        this.#binfmtRules.delete(name);
+    }
+
+    async ["party.openv.process.binfmt.list"](): Promise<ProcessBinfmtRule[]> {
+        return Array.from(this.#binfmtRules.values())
+            .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0))
+            .map((rule) => ({
+                ...rule,
+                magic: rule.magic ? new Uint8Array(rule.magic) : undefined,
+                mask: rule.mask ? new Uint8Array(rule.mask) : undefined,
+            }));
+    }
+
+    #extensionOf(path: string): string {
+        const base = path.split("/").pop() ?? path;
+        const dot = base.lastIndexOf(".");
+        if (dot <= 0 || dot === base.length - 1) return "";
+        return base.slice(dot + 1);
+    }
+
+    #applyMagicMask(source: Uint8Array, mask?: Uint8Array): Uint8Array {
+        if (!mask) return source;
+        const out = new Uint8Array(source.length);
+        for (let i = 0; i < source.length; i++) {
+            out[i] = source[i] & mask[i];
+        }
+        return out;
+    }
+
+    async ["party.openv.process.binfmt.resolve"](command: string, args: string[] = [command]): Promise<ProcessBinfmtMatchResult | null> {
+        const sortedRules = Array.from(this.#binfmtRules.values())
+            .filter((r) => r.enabled !== false)
+            .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+
+        let filePrefix: Uint8Array | null = null;
+        const maxReadLength = sortedRules
+            .filter((r) => r.type === "magic" && r.magic)
+            .reduce((max, r) => Math.max(max, (r.offset ?? 0) + (r.magic?.length ?? 0)), 0);
+
+        for (const rule of sortedRules) {
+            if (rule.type === "extension") {
+                if (this.#extensionOf(command) !== rule.extension) continue;
+            } else {
+                const magic = rule.magic!;
+                const offset = rule.offset ?? 0;
+                if (maxReadLength <= 0) continue;
+                if (filePrefix === null) {
+                    if (!this.#fsExt) continue;
+                    let ofd: number | null = null;
+                    try {
+                        ofd = await this.#fsExt["party.openv.filesystem.open"](command, "r", 0o444);
+                        filePrefix = await this.#fsExt["party.openv.filesystem.read.read"](ofd, maxReadLength, 0);
+                    } catch {
+                        filePrefix = new Uint8Array(0);
+                    } finally {
+                        if (ofd !== null) {
+                            await this.#fsExt["party.openv.filesystem.close"](ofd).catch(() => { });
+                        }
+                    }
+                }
+                if ((offset + magic.length) > filePrefix.length) continue;
+                const chunk = filePrefix.subarray(offset, offset + magic.length);
+                const lhs = this.#applyMagicMask(chunk, rule.mask);
+                const rhs = this.#applyMagicMask(magic, rule.mask);
+                let matches = true;
+                for (let i = 0; i < rhs.length; i++) {
+                    if (lhs[i] !== rhs[i]) {
+                        matches = false;
+                        break;
+                    }
+                }
+                if (!matches) continue;
+            }
+
+            const originalArgv0 = args[0] ?? command;
+            const rewrittenArgs = [rule.interpreter];
+            if (rule.flags?.preserveArgv0) {
+                rewrittenArgs.push(command, originalArgv0, ...args.slice(1));
+            } else {
+                rewrittenArgs.push(command, ...args.slice(1));
+            }
+            return {
+                ruleName: rule.name,
+                interpreter: rule.interpreter,
+                argv: rewrittenArgs,
+                originalExe: command,
+            };
+        }
+        return null;
     }
 
     async ["party.openv.impl.process.onSpawn"](handler: (ctx: ProcessSpawnContext) => Promise<void>): Promise<void> {
@@ -180,13 +318,37 @@ export class CoreProcess implements ProcessComponent, CoreProcessExt {
             throw new Error("cwd and env are mandatory when spawning from the system environment.");
         }
 
+        const requestedArgs = args ?? [command];
+        const binfmt = await this["party.openv.process.binfmt.resolve"](command, requestedArgs);
+        const resolvedCommand = binfmt?.interpreter ?? command;
+        let resolvedArgs = binfmt?.argv ?? requestedArgs;
+        let openBinaryOfd: number | null = null;
+
+        if (binfmt) {
+            const matchedRule = this.#binfmtRules.get(binfmt.ruleName);
+            if (matchedRule?.flags?.openBinary) {
+                if (!this.#fsExt) {
+                    throw new Error("ENOTSUP: binfmt openBinary requires filesystem support.");
+                }
+                const childUid = options.uid ?? 0;
+                openBinaryOfd = await this.#fsExt["party.openv.filesystem.open"](command, "r", 0o444);
+                await this.#fsExt["party.openv.impl.filesystem.setOfdOwner"](openBinaryOfd, childUid);
+                resolvedArgs = [...resolvedArgs];
+                if (resolvedArgs.length > 1) {
+                    resolvedArgs[1] = String(openBinaryOfd);
+                } else {
+                    resolvedArgs.push(String(openBinaryOfd));
+                }
+            }
+        }
+
         const pid = this.#allocatePid({
             ppid: options.ppid ?? 0,
             uid: options.uid ?? 0,
             gid: options.gid ?? 0,
             cwd: options.cwd,
-            exe: command,
-            args: args ?? [command],
+            exe: resolvedCommand,
+            args: resolvedArgs,
             env: options.env,
         });
 
@@ -228,6 +390,9 @@ export class CoreProcess implements ProcessComponent, CoreProcessExt {
         if (selector.id && !this.#executors.has(selector.id)) {
             this.#processTable.delete(pid);
             this.#stdioResults.delete(pid);
+            if (openBinaryOfd !== null && this.#fsExt) {
+                await this.#fsExt["party.openv.filesystem.close"](openBinaryOfd).catch(() => { });
+            }
             throw new Error(`No executor registered with id ${selector.id}.`);
         }
 
@@ -473,23 +638,41 @@ export class CoreProcess implements ProcessComponent, CoreProcessExt {
     }
 
     supports(ns: PROCESS_NAMESPACE_VERSIONED | PROCESS_NAMESPACE): Promise<PROCESS_NAMESPACE_VERSIONED>;
+    supports(ns: PROCESS_BINFMT_NAMESPACE | PROCESS_BINFMT_NAMESPACE_VERSIONED): Promise<PROCESS_BINFMT_NAMESPACE_VERSIONED>;
     supports(ns: typeof CORE_PROCESS_EXT_NAMESPACE_VERSIONED | typeof CORE_PROCESS_EXT_NAMESPACE): Promise<typeof CORE_PROCESS_EXT_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
         if (ns === "party.openv.process" || ns === "party.openv.process/0.1.0") return "party.openv.process/0.1.0";
+        if (ns === "party.openv.process.binfmt" || ns === "party.openv.process.binfmt/0.1.0") return "party.openv.process.binfmt/0.1.0";
         if (ns === CORE_PROCESS_EXT_NAMESPACE || ns === CORE_PROCESS_EXT_NAMESPACE_VERSIONED) return CORE_PROCESS_EXT_NAMESPACE_VERSIONED;
         return null;
     }
 }
 
 
-export class ProcessScopedProcess implements ProcessComponent, ProcessLocalComponent {
+export class ProcessScopedProcess implements ProcessComponent, ProcessBinfmtComponent, ProcessLocalComponent {
 
     #pid: number;
-    #process: ProcessComponent & CoreProcessExt;
+    #process: ProcessComponent & ProcessBinfmtComponent & CoreProcessExt;
 
-    constructor(pid: number, process: ProcessComponent & CoreProcessExt) {
+    constructor(pid: number, process: ProcessComponent & ProcessBinfmtComponent & CoreProcessExt) {
         this.#pid = pid;
         this.#process = process;
+    }
+
+    async #requireRoot(op: string): Promise<void> {
+        const self = await this.#process["party.openv.impl.process.getEntry"](this.#pid);
+        if (self.uid !== 0) {
+            throw new Error(`EPERM: operation not permitted, ${op} requires uid 0`);
+        }
+    }
+
+    async #requireCanControlProcess(targetPid: number, op: string): Promise<void> {
+        const self = await this.#process["party.openv.impl.process.getEntry"](this.#pid);
+        const target = await this.#process["party.openv.impl.process.getEntry"](targetPid);
+        if (self.uid === 0 || self.uid === target.uid || self.pid === targetPid) {
+            return;
+        }
+        throw new Error(`EPERM: operation not permitted, ${op} '${targetPid}'`);
     }
 
     async ["party.openv.process.spawn"](
@@ -534,10 +717,12 @@ export class ProcessScopedProcess implements ProcessComponent, ProcessLocalCompo
     }
 
     async ["party.openv.process.kill"](pid: number): Promise<void> {
+        await this.#requireCanControlProcess(pid, "kill");
         return this.#process["party.openv.process.kill"](pid);
     }
 
     async ["party.openv.process.signal"](pid: number, signal: string): Promise<void> {
+        await this.#requireCanControlProcess(pid, `signal ${signal}`);
         return this.#process["party.openv.impl.process.deliverSignal"](this.#pid, pid, signal);
     }
 
@@ -585,6 +770,24 @@ export class ProcessScopedProcess implements ProcessComponent, ProcessLocalCompo
         ppid: number; uid: number; gid: number; cwd: string; args: string[]; exe: string; env: Record<string, string>;
     }> {
         return this.#process["party.openv.process.getstats"](pid);
+    }
+
+    async ["party.openv.process.binfmt.register"](rule: ProcessBinfmtRule): Promise<void> {
+        await this.#requireRoot("binfmt.register");
+        return this.#process["party.openv.process.binfmt.register"](rule);
+    }
+
+    async ["party.openv.process.binfmt.unregister"](name: string): Promise<void> {
+        await this.#requireRoot("binfmt.unregister");
+        return this.#process["party.openv.process.binfmt.unregister"](name);
+    }
+
+    async ["party.openv.process.binfmt.list"](): Promise<ProcessBinfmtRule[]> {
+        return this.#process["party.openv.process.binfmt.list"]();
+    }
+
+    async ["party.openv.process.binfmt.resolve"](command: string, args?: string[]): Promise<ProcessBinfmtMatchResult | null> {
+        return this.#process["party.openv.process.binfmt.resolve"](command, args);
     }
 
     async ["party.openv.process.local.exit"](code: number): Promise<void> {
@@ -688,10 +891,14 @@ export class ProcessScopedProcess implements ProcessComponent, ProcessLocalCompo
     }
 
     supports(ns: PROCESS_NAMESPACE_VERSIONED | PROCESS_NAMESPACE): Promise<PROCESS_NAMESPACE_VERSIONED>;
+    supports(ns: PROCESS_BINFMT_NAMESPACE_VERSIONED | PROCESS_BINFMT_NAMESPACE): Promise<PROCESS_BINFMT_NAMESPACE_VERSIONED>;
     supports(ns: PROCESS_LOCAL_NAMESPACE_VERSIONED | PROCESS_LOCAL_NAMESPACE): Promise<PROCESS_LOCAL_NAMESPACE_VERSIONED>;
     async supports(ns: string): Promise<string | null> {
         if (ns === "party.openv.process" || ns === "party.openv.process/0.1.0") {
             return "party.openv.process/0.1.0";
+        }
+        if (ns === "party.openv.process.binfmt" || ns === "party.openv.process.binfmt/0.1.0") {
+            return "party.openv.process.binfmt/0.1.0";
         }
         if (ns === "party.openv.process.local" || ns === "party.openv.process.local/0.1.0") {
             return "party.openv.process.local/0.1.0";

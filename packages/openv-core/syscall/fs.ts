@@ -56,6 +56,16 @@ export interface CoreFSExt extends SystemComponent<typeof CORE_FS_EXT_NAMESPACE_
     ["party.openv.impl.filesystem.hasOfd"](ofd: number): Promise<boolean>;
 
     /**
+     * Check if a uid can access an OFD.
+     */
+    ["party.openv.impl.filesystem.canAccessOfd"](ofd: number, uid: number): Promise<boolean>;
+
+    /**
+     * Assign/clear OFD ownership. `null` means globally accessible.
+     */
+    ["party.openv.impl.filesystem.setOfdOwner"](ofd: number, uid: number | null): Promise<void>;
+
+    /**
      * Create an anonymous pipe at the OFD level. Returns [readOfd, writeOfd].
      * Both OFDs are entries in the global open file table backed by a shared
      * in-memory ring buffer.
@@ -177,6 +187,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             path: `<socket:${socketId}>`,
             flags: "r+",
             mode: S_IFSOCK | 0o777,
+            ownerUid: null,
         });
 
         this.#ofdToSocket.set(ofd, { socketId });
@@ -258,6 +269,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             path: `<socket:${serverSocketId}:accepted>`,
             flags: "r+",
             mode: S_IFSOCK | 0o777,
+            ownerUid: null,
         });
         this.#ofdToSocket.set(acceptedOfd, {
             socketId: serverSocketId,
@@ -832,6 +844,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         provider?: Partial<VFS>;
         flags: OpenFlags;
         mode: FileMode;
+        ownerUid?: number | null;
     }> = new Map();
 
     async ["party.openv.filesystem.open"](path: string, flags: OpenFlags, mode: FileMode): Promise<number> {
@@ -869,6 +882,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             provider,
             flags,
             mode,
+            ownerUid: null,
         });
         return ofd;
     }
@@ -1183,6 +1197,22 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         return this.#ofdTable.has(ofd);
     }
 
+    async ["party.openv.impl.filesystem.canAccessOfd"](ofd: number, uid: number): Promise<boolean> {
+        const entry = this.#ofdTable.get(ofd);
+        if (!entry) return false;
+        if (uid === 0) return true;
+        if (entry.ownerUid === undefined || entry.ownerUid === null) return true;
+        return entry.ownerUid === uid;
+    }
+
+    async ["party.openv.impl.filesystem.setOfdOwner"](ofd: number, uid: number | null): Promise<void> {
+        const entry = this.#ofdTable.get(ofd);
+        if (!entry) {
+            throw new Error(`Global open file number ${ofd} does not exist.`);
+        }
+        entry.ownerUid = uid;
+    }
+
     async ["party.openv.impl.filesystem.createPipeOfd"](bufferSize?: number): Promise<[readOfd: number, writeOfd: number]> {
         return this.#createPipeOfdPair(bufferSize);
     }
@@ -1212,11 +1242,13 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             path: `<pipe:${pipeId}:read>`,
             flags: "r",
             mode: 0,
+            ownerUid: null,
         });
         this.#ofdTable.set(writeOfd, {
             path: `<pipe:${pipeId}:write>`,
             flags: "w",
             mode: 0,
+            ownerUid: null,
         });
 
         this.#ofdToPipe.set(writeOfd, { kind: "anon", pipeId, role: "write" });
@@ -1280,6 +1312,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             path: fifo.path ?? `<fifo:${fifo.id}>`,
             flags,
             mode: fifo.mode,
+            ownerUid: null,
         });
         this.#ofdToPipe.set(ofd, { kind: "fifo", fifoId, canRead, canWrite });
         return ofd;
@@ -1893,6 +1926,7 @@ export class ProcessScopedFS implements
         const ofd = await this.#system["party.openv.filesystem.open"](
             path, flags, mode !== undefined ? this.#applyUmask(mode) : mode
         );
+        await this.#system["party.openv.impl.filesystem.setOfdOwner"](ofd, await this.#getUid());
         const fd = ++this.#fdCounter;
         this.#fdToOfd.set(fd, ofd);
         return fd;
@@ -2096,6 +2130,10 @@ export class ProcessScopedFS implements
         if (!await this.#system["party.openv.impl.filesystem.hasOfd"](ofd)) {
             throw new Error(`Global open file number ${ofd} does not exist.`);
         }
+        const uid = await this.#getUid();
+        if (!await this.#system["party.openv.impl.filesystem.canAccessOfd"](ofd, uid)) {
+            throw new Error(`EPERM: operation not permitted, setfd '${ofd}'`);
+        }
         if (this.#fdToOfd.has(targetFd)) {
             const existingOfd = this.#fdToOfd.get(targetFd)!;
             this.#fdToOfd.delete(targetFd);
@@ -2107,6 +2145,9 @@ export class ProcessScopedFS implements
 
     async ["party.openv.filesystem.pipe.create"](bufferSize?: number): Promise<[readEnd: number, writeEnd: number]> {
         const [readOfd, writeOfd] = await this.#system["party.openv.impl.filesystem.createPipeOfd"](bufferSize);
+        const uid = await this.#getUid();
+        await this.#system["party.openv.impl.filesystem.setOfdOwner"](readOfd, uid);
+        await this.#system["party.openv.impl.filesystem.setOfdOwner"](writeOfd, uid);
         const readFd = ++this.#fdCounter;
         const writeFd = ++this.#fdCounter;
         this.#fdToOfd.set(readFd, readOfd);
@@ -2116,6 +2157,7 @@ export class ProcessScopedFS implements
 
     async ["party.openv.filesystem.socket.create"](type: FileSystemSocketType): Promise<number> {
         const ofd = await this.#system["party.openv.filesystem.socket.create"](type);
+        await this.#system["party.openv.impl.filesystem.setOfdOwner"](ofd, await this.#getUid());
         const fd = ++this.#fdCounter;
         this.#fdToOfd.set(fd, ofd);
         return fd;
@@ -2139,6 +2181,7 @@ export class ProcessScopedFS implements
     async ["party.openv.filesystem.socket.accept"](fd: number): Promise<number> {
         const ofd = this.#resolveOfd(fd);
         const acceptedOfd = await this.#system["party.openv.filesystem.socket.accept"](ofd);
+        await this.#system["party.openv.impl.filesystem.setOfdOwner"](acceptedOfd, await this.#getUid());
         const acceptedFd = ++this.#fdCounter;
         this.#fdToOfd.set(acceptedFd, acceptedOfd);
         return acceptedFd;

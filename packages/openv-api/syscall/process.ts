@@ -5,6 +5,35 @@ export type PROCESS_NAMESPACE = "party.openv.process";
 export type PROCESS_NAMESPACE_VERSIONED = "party.openv.process/0.1.0";
 export type PROCESS_LOCAL_NAMESPACE = "party.openv.process.local";
 export type PROCESS_LOCAL_NAMESPACE_VERSIONED = "party.openv.process.local/0.1.0";
+export type PROCESS_BINFMT_NAMESPACE = "party.openv.process.binfmt";
+export type PROCESS_BINFMT_NAMESPACE_VERSIONED = "party.openv.process.binfmt/0.1.0";
+
+export type ProcessBinfmtRuleType = "magic" | "extension";
+
+export interface ProcessBinfmtFlags {
+    preserveArgv0?: boolean;
+    openBinary?: boolean;
+}
+
+export interface ProcessBinfmtRule {
+    name: string;
+    type: ProcessBinfmtRuleType;
+    interpreter: string;
+    enabled?: boolean;
+    priority?: number;
+    flags?: ProcessBinfmtFlags;
+    magic?: Uint8Array;
+    mask?: Uint8Array;
+    offset?: number;
+    extension?: string;
+}
+
+export interface ProcessBinfmtMatchResult {
+    ruleName: string;
+    interpreter: string;
+    argv: string[];
+    originalExe: string;
+}
 
 /**
  * This signal is emitted when a process is going to exit gracefully. The process manager will send this signal authored by a child process to its parent process when the `party.openv.process.local.exit` syscall is called.
@@ -167,6 +196,13 @@ export interface ProcessComponent extends SystemComponent<PROCESS_NAMESPACE_VERS
         exe: string;
         env: Record<string, string>;
     }>;
+}
+
+export interface ProcessBinfmtComponent extends SystemComponent<PROCESS_BINFMT_NAMESPACE_VERSIONED, PROCESS_BINFMT_NAMESPACE> {
+    ["party.openv.process.binfmt.register"](rule: ProcessBinfmtRule): Promise<void>;
+    ["party.openv.process.binfmt.unregister"](name: string): Promise<void>;
+    ["party.openv.process.binfmt.list"](): Promise<ProcessBinfmtRule[]>;
+    ["party.openv.process.binfmt.resolve"](command: string, args?: string[]): Promise<ProcessBinfmtMatchResult | null>;
 }
 
 /**
