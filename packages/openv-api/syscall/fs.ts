@@ -133,9 +133,9 @@ export interface FileSystemReadWriteComponent extends SystemComponent<FS_WRITE_N
     ["party.openv.filesystem.write.rmdir"](path: string): Promise<void>;
     ["party.openv.filesystem.write.rename"](oldPath: string, newPath: string): Promise<void>;
     ["party.openv.filesystem.write.unlink"](path: string): Promise<void>;
-    ["party.openv.filesystem.write.symlink"]?(target: string, path: string, mode?: FileMode): Promise<void>;
-    ["party.openv.filesystem.write.chmod"]?(path: string, mode: FileMode): Promise<void>;
-    ["party.openv.filesystem.write.chown"]?(path: string, uid: number, gid: number): Promise<void>;
+    ["party.openv.filesystem.write.symlink"](target: string, path: string, mode?: FileMode): Promise<void>;
+    ["party.openv.filesystem.write.chmod"](path: string, mode: FileMode): Promise<void>;
+    ["party.openv.filesystem.write.chown"](path: string, uid: number, gid: number): Promise<void>;
 
     // FUTURE: extended permissions management
 }

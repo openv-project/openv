@@ -17,7 +17,8 @@
         "party.openv.api", 
         "party.openv.filesystem", 
         "party.openv.registry", 
-        "party.openv.process"
+        "party.openv.process",
+        "party.openv.sync"
     ],
     "backup": ["etc/openv.js"],
     "upk-schema": "1"

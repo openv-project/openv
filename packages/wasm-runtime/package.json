@@ -1,0 +1,11 @@
+{
+    "name": "@openv-project/wasm-runtime",
+    "version": "0.1.0",
+    "type": "module",
+    "main": "./main.ts",
+    "dependencies": {
+        "@openv-project/openv-api": "^0.1.0",
+        "@openv-project/api-sync": "^0.1.0"
+    },
+    "license": "MIT"
+}

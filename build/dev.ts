@@ -71,6 +71,9 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
     let pathname = url.pathname;
 
+    res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+    res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+
     if (pathname === "/sw.js" || pathname === "/sw.js.map") {
         res.setHeader("Service-Worker-Allowed", "/");
     }

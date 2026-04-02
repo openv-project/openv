@@ -1,11 +1,9 @@
 import * as esbuild from "esbuild";
-import { readdir, readFile, writeFile, mkdir, cp, rm, chmod, chown, lstat } from "node:fs/promises";
+import { readdir, readFile, writeFile, mkdir, cp, rm, chmod, chown, symlink as createSymlink, readlink, lstat } from "node:fs/promises";
 import { join, relative, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { execSync } from "node:child_process";
-import { createTar, type TarFileAttrs, type TarFileInput } from "nanotar";
-import { gzipSync } from "fflate";
 import { importRewriter } from "./import-rewriter.ts";
 import filesystemLayout from "../packages/filesystem/layout.json" with { type: "json" };
 
@@ -45,17 +43,30 @@ type FilesystemLayout = {
     symlinks: FilesystemLayoutSymlink[];
 };
 
+type PackageEntrypoint = {
+    source: string;
+    output: string;
+    executable?: boolean;
+    sourcemap?: boolean;
+    external?: string[];
+};
+
 type PackageConfig = {
     src: string;
     installPath: string;
     distName: string;
     typesOnly?: boolean;
+    entrypoints?: PackageEntrypoint[];
+    copyTypes?: boolean;
     buildUpk?: boolean;
     manifestPath?: string;
     bootstrapSelectable?: boolean;
     bootstrapDefaultSelected?: boolean;
     bootstrapLabel?: string;
 };
+
+const DEV_PACKAGE_SUFFIX = "-dev";
+const DEV_ARTIFACT_EXTENSIONS = [".d.ts", ".d.mts", ".d.cts", ".d.ts.map", ".map"];
 
 const PACKAGES: PackageConfig[] = [
     {
@@ -95,6 +106,35 @@ const PACKAGES: PackageConfig[] = [
         typesOnly: true 
     },
     {
+        src: "packages/wasm-runtime",
+        installPath: "/",
+        distName: "wasm-runtime",
+        entrypoints: [
+            {
+                source: "main.ts",
+                output: "/usr/bin/wasm-runtime",
+                executable: true,
+                sourcemap: false,
+                external: ["/@/*"],
+            },
+        ],
+        copyTypes: false,
+        buildUpk: true,
+        manifestPath: "packages/wasm-runtime/.manifest",
+        bootstrapSelectable: true,
+        bootstrapDefaultSelected: true,
+    },
+    {
+        src: "packages/party.openv.api.sync",
+        installPath: "/lib/openv/api/sync",
+        distName: "party.openv.api.sync",
+        buildUpk: true,
+        manifestPath: "packages/party.openv.api.sync/.manifest",
+        bootstrapSelectable: true,
+        bootstrapDefaultSelected: true,
+        bootstrapLabel: "Sync API"
+    },
+    {
         src: "packages/party.openv.libupk",
         installPath: "/lib/openv/libupk",
         distName: "party.openv.libupk",
@@ -111,7 +151,7 @@ const PACKAGES: PackageConfig[] = [
         buildUpk: true,
         manifestPath: "packages/party.openv.api.filesystem/.manifest",
         bootstrapSelectable: true,
-        bootstrapDefaultSelected: false,
+        bootstrapDefaultSelected: true,
         bootstrapLabel: "Filesystem API"
     },
     { 
@@ -121,7 +161,7 @@ const PACKAGES: PackageConfig[] = [
         buildUpk: true,
         manifestPath: "packages/party.openv.api.registry/.manifest",
         bootstrapSelectable: true,
-        bootstrapDefaultSelected: false,
+        bootstrapDefaultSelected: true,
         bootstrapLabel: "Registry API"
     },
     {
@@ -131,7 +171,7 @@ const PACKAGES: PackageConfig[] = [
         buildUpk: true,
         manifestPath: "packages/party.openv.api.devfs/.manifest",
         bootstrapSelectable: true,
-        bootstrapDefaultSelected: false,
+        bootstrapDefaultSelected: true,
         bootstrapLabel: "DevFS API"
     },
     {
@@ -235,14 +275,6 @@ async function applyFsAttrs(path: string, meta: Stage0Meta | undefined, defaultM
     }
 }
 
-function tarAttrs(meta: Stage0Meta | undefined, fallbackMode: number): TarFileAttrs {
-    return {
-        uid: meta?.uid ?? ROOT_UID,
-        gid: meta?.gid ?? ROOT_GID,
-        mode: modeToOctalString(meta?.mode, fallbackMode),
-    };
-}
-
 function normalizeLayoutPath(path: string): string {
     const normalized = toPosix(path).replace(/\/+/g, "/");
     const withLeadingSlash = normalized.startsWith("/") ? normalized : `/${normalized}`;
@@ -325,7 +357,6 @@ async function buildFilesystemLayoutPackage(packageBuildDir: string): Promise<vo
 
     await writeFile(join(packageBuildDir, ".MTREE"), `${mtreeLines.join("\n")}\n`, "utf8");
 }
-
 async function collectFiles(dir: string, exts: string[]): Promise<string[]> {
     const results: string[] = [];
     for (const entry of await readdir(dir, { withFileTypes: true, recursive: true })) {
@@ -351,7 +382,29 @@ async function copySkelFiles(
         const entries = await readdir(srcDir, { withFileTypes: true });
         entries.sort((a, b) => a.name.localeCompare(b.name));
 
-        for (const entry of entries) {
+        const metaEntries = entries
+            .filter((entry) => entry.isFile() && entry.name.endsWith(".meta"))
+            .map((entry) => entry.name.slice(0, -5));
+
+        const normalEntries = entries.filter((entry) => !entry.name.endsWith(".meta"));
+
+        for (const basename of metaEntries) {
+            const hasTarget = normalEntries.some((entry) => entry.name === basename);
+            if (hasTarget) continue;
+
+            const srcPath = join(srcDir, basename);
+            const currentRelPath = relPath ? `${relPath}/${basename}` : basename;
+            const destPath = join(destDir, currentRelPath);
+            const meta = await readMeta(`${srcPath}.meta`);
+            if (!meta?.symlink || meta.symlink.length === 0) continue;
+
+            await ensureDir(dirname(destPath));
+            await rm(destPath, { force: true });
+            await createSymlink(meta.symlink, destPath);
+            skelMetaMap.set(currentRelPath, meta);
+        }
+
+        for (const entry of normalEntries) {
             if (entry.name.endsWith(".meta")) continue;
 
             const srcPath = join(srcDir, entry.name);
@@ -369,8 +422,13 @@ async function copySkelFiles(
             if (!entry.isFile()) continue;
 
             await ensureDir(dirname(destPath));
-            await cp(srcPath, destPath);
-            await applyFsAttrs(destPath, meta, DEFAULT_FILE_MODE);
+            if (meta?.symlink && meta.symlink.length > 0) {
+                await rm(destPath, { force: true });
+                await createSymlink(meta.symlink, destPath);
+            } else {
+                await cp(srcPath, destPath);
+                await applyFsAttrs(destPath, meta, DEFAULT_FILE_MODE);
+            }
 
             if (meta) skelMetaMap.set(currentRelPath, meta);
         }
@@ -378,6 +436,36 @@ async function copySkelFiles(
 
     await copyDir(skelDir);
     return skelMetaMap;
+}
+
+async function buildConfiguredEntrypoints(
+    pkg: PackageConfig,
+    srcDir: string,
+    packageBuildDir: string,
+): Promise<number> {
+    const entrypoints = pkg.entrypoints ?? [];
+    for (const entrypoint of entrypoints) {
+        const inputPath = join(srcDir, entrypoint.source);
+        const outputPath = join(packageBuildDir, entrypoint.output.replace(/^\/+/, ""));
+        await ensureDir(dirname(outputPath));
+
+        await esbuild.build({
+            entryPoints: [inputPath],
+            outfile: outputPath,
+            format: "esm",
+            bundle: true,
+            platform: "browser",
+            minify: true,
+            sourcemap: entrypoint.sourcemap ?? false,
+            target: "es2022",
+            external: entrypoint.external ?? [],
+        });
+
+        if (entrypoint.executable) {
+            await chmod(outputPath, 0o755);
+        }
+    }
+    return entrypoints.length;
 }
 
 async function buildPackage(
@@ -390,9 +478,16 @@ async function buildPackage(
     const installBasePath = pkg.installPath.replace(/^\//, "");
     const packageInstallDir = join(packageBuildDir, installBasePath);
 
+    await ensureDir(packageBuildDir);
     await ensureDir(packageInstallDir);
 
-    if (!pkg.typesOnly) {
+    const configuredEntrypointCount = await buildConfiguredEntrypoints(pkg, srcDir, packageBuildDir);
+
+    if (configuredEntrypointCount > 0) {
+        console.log(`  js: ${pkg.distName} (${configuredEntrypointCount} configured entr${configuredEntrypointCount === 1 ? "y" : "ies"})`);
+    }
+
+    if (!pkg.typesOnly && configuredEntrypointCount === 0) {
         if (pkg.distName === "filesystem") {
             await buildFilesystemLayoutPackage(packageBuildDir);
             console.log(`  layout: ${pkg.distName} (mtree + files)`);
@@ -598,12 +693,12 @@ async function buildPackage(
             }
         }
         }
-    } else {
+    } else if (pkg.typesOnly) {
         console.log(`  js: ${pkg.distName} (types-only, skipped)`);
     }
 
     const tscOut = join(ROOT, "dist-types", pkg.distName);
-    if (existsSync(tscOut)) {
+    if ((pkg.copyTypes ?? true) && existsSync(tscOut)) {
         const dtsFiles = await collectFiles(tscOut, [".d.ts", ".d.ts.map"]);
         for (const dts of dtsFiles) {
             const rel = relative(tscOut, dts);
@@ -614,12 +709,11 @@ async function buildPackage(
         console.log(`  d.ts: ${pkg.distName} (${dtsFiles.length} files)`);
     }
 
-    if (pkg.distName === "openv-core") {
-        const skelDir = join(ROOT, pkg.src, "skel");
-        if (existsSync(skelDir)) {
-            await copySkelFiles(skelDir, packageBuildDir);
-            console.log(`  skel: ${pkg.distName} (etc files)`);
-        }
+    const skelDir = join(ROOT, pkg.src, "skel");
+    if (existsSync(skelDir)) {
+        await copySkelFiles(skelDir, packageBuildDir);
+        console.log(`  skel: ${pkg.distName}`);
+        await buildPackageMtree(packageBuildDir);
     }
 
     if (pkg.buildUpk && pkg.manifestPath) {
@@ -643,54 +737,149 @@ async function buildPackage(
     }
 }
 
-async function createUpkPackage(
+function createDevPackageConfig(pkg: PackageConfig): PackageConfig {
+    return {
+        src: pkg.src,
+        installPath: pkg.installPath,
+        distName: `${pkg.distName}${DEV_PACKAGE_SUFFIX}`,
+        buildUpk: true,
+        bootstrapSelectable: true,
+        bootstrapDefaultSelected: false,
+        bootstrapLabel: `${pkg.bootstrapLabel ?? pkg.distName} (dev)`,
+    };
+}
+
+async function splitDevArtifactsIntoCompanionPackage(
     pkg: PackageConfig,
     buildDir: string,
-    skelMetaMap: Map<string, Stage0Meta>
-): Promise<void> {
+): Promise<PackageConfig | null> {
+    if (!pkg.buildUpk || pkg.distName.endsWith(DEV_PACKAGE_SUFFIX)) {
+        return null;
+    }
+
     const packageBuildDir = join(buildDir, pkg.distName);
-    const tarEntries: TarFileInput[] = [];
+    const installBasePath = pkg.installPath.replace(/^\/+/, "");
+    const packageInstallDir = join(packageBuildDir, installBasePath);
+    if (!existsSync(packageInstallDir)) {
+        return null;
+    }
 
-    async function walkDir(dir: string, baseDir: string = "") {
+    const devArtifacts = await collectFiles(packageInstallDir, DEV_ARTIFACT_EXTENSIONS);
+    if (devArtifacts.length === 0) {
+        return null;
+    }
+
+    const devPkg = createDevPackageConfig(pkg);
+    const devBuildDir = join(buildDir, devPkg.distName);
+    const devInstallDir = join(devBuildDir, installBasePath);
+    await ensureDir(devBuildDir);
+    await ensureDir(devInstallDir);
+
+    for (const artifactPath of devArtifacts) {
+        const rel = relative(packageInstallDir, artifactPath);
+        const devPath = join(devInstallDir, rel);
+        await ensureDir(dirname(devPath));
+        await cp(artifactPath, devPath);
+        await rm(artifactPath, { force: true });
+    }
+
+    const mainManifestPath = join(packageBuildDir, ".manifest");
+    if (existsSync(mainManifestPath)) {
+        const raw = await readFile(mainManifestPath, "utf8");
+        const mainManifest = JSON.parse(raw) as Record<string, unknown>;
+        const mainManifestName = typeof mainManifest.name === "string" ? mainManifest.name : pkg.distName;
+        const mainDepend = Array.isArray(mainManifest.depend) ? mainManifest.depend : [];
+        mainManifest.name = `${mainManifestName}${DEV_PACKAGE_SUFFIX}`;
+        if (typeof mainManifest.description === "string") {
+            mainManifest.description = `${mainManifest.description} (development artifacts)`;
+        }
+        mainManifest.depend = [mainManifestName, ...mainDepend].filter((dep, index, deps) => {
+            return typeof dep === "string" && deps.indexOf(dep) === index;
+        });
+        mainManifest.builddate = Math.floor(Date.now() / 1000);
+        await writeFile(join(devBuildDir, ".manifest"), `${JSON.stringify(mainManifest, null, 2)}\n`, "utf8");
+    }
+
+    await buildPackageMtree(packageBuildDir);
+    await buildPackageMtree(devBuildDir);
+
+    console.log(`  dev: ${pkg.distName} -> ${devPkg.distName} (${devArtifacts.length} files)`);
+    return devPkg;
+}
+
+async function buildPackageMtree(packageBuildDir: string): Promise<void> {
+    const textEncoder = new TextEncoder();
+    const dirEntries = new Set<string>();
+    const fileEntries = new Map<string, number>();
+    const symlinkEntries = new Map<string, string>();
+
+    const walkDir = async (dir: string, relPath: string = ""): Promise<void> => {
         const entries = await readdir(dir, { withFileTypes: true });
-        entries.sort((a, b) => a.name.localeCompare(b.name));
-
         for (const entry of entries) {
+            if (entry.name === ".manifest" || entry.name === ".MTREE") continue;
+
             const fullPath = join(dir, entry.name);
-            const relPath = baseDir ? `${baseDir}/${entry.name}` : entry.name;
+            const currentRel = relPath ? `${relPath}/${entry.name}` : entry.name;
 
             if (entry.isDirectory()) {
-                await walkDir(fullPath, relPath);
-                continue;
+                dirEntries.add(currentRel);
+                await walkDir(fullPath, currentRel);
+            } else if (entry.isSymbolicLink()) {
+                const target = await readlink(fullPath, "utf8");
+                if (target) symlinkEntries.set(currentRel, target);
+            } else if (entry.isFile()) {
+                const stat = await readFile(fullPath);
+                fileEntries.set(currentRel, stat.length);
             }
-
-            if (!entry.isFile()) continue;
-
-            const meta = skelMetaMap.get(relPath);
-            tarEntries.push({
-                name: relPath,
-                data: await readFile(fullPath),
-                attrs: tarAttrs(meta, DEFAULT_FILE_MODE),
-            });
         }
-    }
+    };
 
     await walkDir(packageBuildDir);
 
-    const tar = createTar(tarEntries, {
-        attrs: {
-            uid: ROOT_UID,
-            gid: ROOT_GID,
-        },
-    });
+    if (dirEntries.size === 0 && fileEntries.size === 0 && symlinkEntries.size === 0) {
+        return;
+    }
 
-    const gzipped = gzipSync(tar);
+    const mtreeLines = [
+        "#mtree",
+        "/set uid=0 gid=0",
+    ];
 
+    const sortedDirectories = Array.from(dirEntries).sort((a, b) => a.localeCompare(b));
+    for (const directory of sortedDirectories) {
+        mtreeLines.push(`./${toMtreePath(directory)} type=dir mode=0755`);
+    }
+
+    const sortedFiles = Array.from(fileEntries.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    for (const [filePath, size] of sortedFiles) {
+        mtreeLines.push(`./${toMtreePath(filePath)} type=file mode=${modeToOctalString(DEFAULT_FILE_MODE, DEFAULT_FILE_MODE)} size=${size}`);
+    }
+
+    const sortedSymlinks = Array.from(symlinkEntries.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    for (const [linkPath, target] of sortedSymlinks) {
+        mtreeLines.push(`./${toMtreePath(linkPath)} type=link mode=0777 link=${target}`);
+    }
+
+    await writeFile(join(packageBuildDir, ".MTREE"), `${mtreeLines.join("\n")}\n`, "utf8");
+}
+
+async function createUpkPackage(
+    pkg: PackageConfig,
+    buildDir: string
+): Promise<void> {
+    const packageBuildDir = join(buildDir, pkg.distName);
     await ensureDir(PACKAGES_DIR);
     const outputPath = join(PACKAGES_DIR, `${pkg.distName}.tar.gz`);
-    await writeFile(outputPath, gzipped);
+    execSync(
+        [
+            `find . -mindepth 1 -maxdepth 1 -printf '%P\\0'`,
+            `tar --null --files-from=- --create --gzip --file "${outputPath}" --owner=0 --group=0 --numeric-owner`,
+        ].join(" | "),
+        { cwd: packageBuildDir, stdio: "inherit" }
+    );
 
-    console.log(`  ${pkg.distName}.tar.gz (${tarEntries.length} files, ${(gzipped.length / 1024).toFixed(1)} KB)`);
+    const archiveSize = (await readFile(outputPath)).length;
+    console.log(`  ${pkg.distName}.tar.gz (${(archiveSize / 1024).toFixed(1)} KB)`);
 }
 
 await ensureDir(DIST);
@@ -716,19 +905,28 @@ for (const pkg of PACKAGES) {
 
 console.log("\nbuilding packages...");
 const skelMetaMap = new Map<string, Stage0Meta>();
+const builtPackages: PackageConfig[] = [];
+const generatedDevPackages: PackageConfig[] = [];
 
 for (const pkg of PACKAGES) {
     await buildPackage(pkg, tempBuild, skelMetaMap);
-}
-
-console.log("\ncreating UPK packages...");
-for (const pkg of PACKAGES) {
-    if (pkg.buildUpk) {
-        await createUpkPackage(pkg, tempBuild, skelMetaMap);
+    builtPackages.push(pkg);
+    const devPkg = await splitDevArtifactsIntoCompanionPackage(pkg, tempBuild);
+    if (devPkg) {
+        generatedDevPackages.push(devPkg);
     }
 }
 
-const bootstrapPackages = PACKAGES
+const outputPackages = [...builtPackages, ...generatedDevPackages];
+
+console.log("\ncreating UPK packages...");
+for (const pkg of outputPackages) {
+    if (pkg.buildUpk) {
+        await createUpkPackage(pkg, tempBuild);
+    }
+}
+
+const bootstrapPackages = outputPackages
     .filter((pkg) => pkg.buildUpk && pkg.bootstrapSelectable !== false)
     .map((pkg) => ({
         path: `/packages/${pkg.distName}.tar.gz`,

@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "/@/*": ["types/@/*"]
+    },
+    "rootDir": "..",
+    "outDir": "../../dist-types/wasm-runtime",
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.d.ts"
+  ]
+}

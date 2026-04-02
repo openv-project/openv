@@ -1,0 +1,14 @@
+{
+  "name": "party.openv.wasm-runtime",
+  "version": "0.1.0-1",
+  "description": "wasm runtime implementation for openv",
+  "license": "MIT",
+  "platform": "openv",
+  "packager": "Endercass <contact@endercass.me>",
+  "builddate": 0,
+  "urls": {
+    "homepage": "https://openv.party",
+    "git": "https://github.com/openv-project/openv"
+  },
+  "upk-schema": "1"
+}

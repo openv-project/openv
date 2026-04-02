@@ -12,6 +12,7 @@ interface ProcessEntry {
     exe: string;
     args: string[];
     env: Record<string, string>;
+    stdioOfds?: [stdinOfd?: number, stdoutOfd?: number, stderrOfd?: number];
     waiters: Array<(code: number | null) => void>;
     running: boolean;
     exitCode: number | null;
@@ -342,23 +343,15 @@ export class CoreProcess implements ProcessComponent, ProcessBinfmtComponent, Co
             }
         }
 
-        const pid = this.#allocatePid({
-            ppid: options.ppid ?? 0,
-            uid: options.uid ?? 0,
-            gid: options.gid ?? 0,
-            cwd: options.cwd,
-            exe: resolvedCommand,
-            args: resolvedArgs,
-            env: options.env,
-        });
-
         const stdioSpec = options.stdio;
         const stdioOfds: [number | undefined, number | undefined, number | undefined] = [undefined, undefined, undefined];
         const stdioResult: SpawnStdioResult = {};
+        const parentEntry = options.ppid ? this.#processTable.get(options.ppid) : undefined;
+        const parentStdioOfds = parentEntry?.stdioOfds;
 
-        if (stdioSpec && this.#fsExt) {
+        if (this.#fsExt) {
             for (let i = 0; i < 3; i++) {
-                const opt = stdioSpec[i];
+                const opt = stdioSpec?.[i];
                 if (opt === "pipe") {
                     const [readOfd, writeOfd] = await this.#fsExt["party.openv.impl.filesystem.createPipeOfd"]();
                     if (i === 0) {
@@ -371,9 +364,26 @@ export class CoreProcess implements ProcessComponent, ProcessBinfmtComponent, Co
                     }
                 } else if (typeof opt === "number") {
                     stdioOfds[i] = opt;
+                } else {
+                    // Process-local default semantics: undefined/null means "inherit".
+                    const shouldInherit = opt === "inherit" || (opt == null && options.ppid !== undefined && options.ppid !== 0);
+                    if (shouldInherit && parentStdioOfds) {
+                        stdioOfds[i] = parentStdioOfds[i];
+                    }
                 }
             }
         }
+
+        const pid = this.#allocatePid({
+            ppid: options.ppid ?? 0,
+            uid: options.uid ?? 0,
+            gid: options.gid ?? 0,
+            cwd: options.cwd,
+            exe: resolvedCommand,
+            args: resolvedArgs,
+            env: options.env,
+            stdioOfds,
+        });
 
         if (
             stdioResult.stdin !== undefined ||
@@ -523,14 +533,6 @@ export class CoreProcess implements ProcessComponent, ProcessBinfmtComponent, Co
         const entry = this.#getEntry(targetPid);
         if (!entry.running) {
             throw new Error(`Process ${targetPid} is not running.`);
-        }
-
-        if (signal === "party.openv.process.signals.notifyexit") {
-            for (const resolve of entry.waiters) {
-                resolve(entry.exitCode);
-            }
-            entry.waiters = [];
-            return;
         }
 
         const handler = entry.signalHandlers.get(signal);
@@ -686,6 +688,13 @@ export class ProcessScopedProcess implements ProcessComponent, ProcessBinfmtComp
             throw new Error("Only a process with uid 0 may change uid/gid on spawn.");
         }
 
+        const inheritedStdio = self.stdioOfds;
+        const mergedStdio: [StdioOption?, StdioOption?, StdioOption?] = [
+            options?.stdio?.[0] ?? (inheritedStdio?.[0] !== undefined ? "inherit" : undefined),
+            options?.stdio?.[1] ?? (inheritedStdio?.[1] !== undefined ? "inherit" : undefined),
+            options?.stdio?.[2] ?? (inheritedStdio?.[2] !== undefined ? "inherit" : undefined),
+        ];
+
         return this.#process["party.openv.process.spawn"](command, args, {
             ...options,
             ppid: this.#pid,
@@ -693,6 +702,7 @@ export class ProcessScopedProcess implements ProcessComponent, ProcessBinfmtComp
             gid: options?.gid ?? self.gid,
             cwd: options?.cwd ?? self.cwd,
             env: options?.env ?? { ...self.env },
+            stdio: mergedStdio,
         });
     }
 

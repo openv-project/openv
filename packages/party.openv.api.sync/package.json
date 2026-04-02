@@ -1,0 +1,10 @@
+{
+    "name": "@openv-project/api-sync",
+    "version": "0.1.0",
+    "main": "mod.ts",
+    "types": "mod.ts",
+    "dependencies": {
+        "@openv-project/openv-api": "^0.1.0"
+    },
+    "license": "MIT"
+}

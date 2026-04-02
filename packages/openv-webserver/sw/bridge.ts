@@ -7,6 +7,8 @@ declare const self: ServiceWorkerGlobalScope;
 export const BRIDGE_KEY = "/system/party/openv/serviceWorker/bridge" as const;
 const BRIDGE_FS_CACHE_NAME = "party-openv-serviceworker-bridge-fscache-v1";
 const BRIDGE_DEFAULT_CACHE_MAX_BYTES = 2 * 1024 * 1024;
+const BRIDGE_COOP_HEADER = "same-origin";
+const BRIDGE_COEP_HEADER = "require-corp";
 const IPC_FILE_MODE_MASK = 0o170000;
 const IPC_FILE_MODE_FIFO = 0o010000;
 const IPC_FILE_MODE_SOCKET = 0o140000;
@@ -96,6 +98,7 @@ export function handleFetch(event: FetchEvent): void {
 
         const url = new URL(event.request.url);
         const reqPath = url.pathname;
+        const forcedMimeType = url.searchParams.get("mimeType");
 
         let matchedWebPrefix: string | null = null;
         let matchedFsPrefix: string | null = null;
@@ -118,11 +121,23 @@ export function handleFetch(event: FetchEvent): void {
         const normalized = "/" + joined.replace(/\/+/g, "/").replace(/^\/+/, "");
 
         const allowFallback = bridgeWebRootFallback && matchedWebPrefix === "/";
-        return serveFsPath(normalized, event, allowFallback ? event.request : undefined);
+        const response = await serveFsPath(normalized, event, allowFallback ? event.request : undefined, forcedMimeType);
+        return withBridgeIsolationHeaders(response);
     })());
 }
 
-async function serveFsPath(fsPath: string, event?: FetchEvent, fallbackRequest?: Request): Promise<Response> {
+function withBridgeIsolationHeaders(response: Response): Response {
+    const headers = new Headers(response.headers);
+    headers.set("Cross-Origin-Opener-Policy", BRIDGE_COOP_HEADER);
+    headers.set("Cross-Origin-Embedder-Policy", BRIDGE_COEP_HEADER);
+    return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+    });
+}
+
+async function serveFsPath(fsPath: string, event?: FetchEvent, fallbackRequest?: Request, forcedMimeType?: string | null): Promise<Response> {
     try {
         if (bridgeCacheEnabled && bridgeCacheValidationMode === "async") {
             const fastCached = await tryServeCachedFast(fsPath, event);
@@ -149,7 +164,7 @@ async function serveFsPath(fsPath: string, event?: FetchEvent, fallbackRequest?:
             }
         }
 
-        return serveFsFile(fsPath, stat);
+        return serveFsFile(fsPath, stat, forcedMimeType || undefined);
 
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "outDir": "../../dist-types/party.openv.api.sync"
+  },
+  "include": [
+    "**/*.ts",
+  ]
+}

@@ -27,7 +27,13 @@ function maybeTypedArrayLikeObject(value: unknown): Uint8Array | null {
 }
 
 function isArrayBufferLike(value: unknown): value is ArrayBuffer {
-    return Object.prototype.toString.call(value) === "[object ArrayBuffer]";
+    switch (Object.prototype.toString.call(value)) {
+        case "[object ArrayBuffer]":
+        case "[object SharedArrayBuffer]":
+            return true;
+        default:
+            return false;
+    }
 }
 
 function isBlobLike(value: unknown): value is Blob {

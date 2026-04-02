@@ -19,26 +19,30 @@ export async function registerWebExecutor(
 
     await system["party.openv.impl.process.registerExecutor"]({ id: executorId, class: executorClass }, async (ctx) => {
         try {
-            console.debug(`[executor] spawning process with pid=${ctx.pid} using executor '${executorId}'`);
-            const worker = new Worker(
-                `/@${ctx.exe}?pid=${ctx.pid}`,
-                { type: "module" }
-            );
-            workers.set(ctx.pid, worker);
-
             const env = await buildEnv(ctx);
 
+            let worker: Worker | undefined;
+            const pendingListeners = new Set<(ev: MessageEvent) => void>();
+            const pendingOutboundMessages: any[] = [];
             const localEndpoint = {
                 postMessage(_msg: any) { },
                 addEventListener(_type: "message", handler: (ev: MessageEvent) => void) {
-                    worker.addEventListener("message", handler);
+                    pendingListeners.add(handler);
+                    if (worker) worker.addEventListener("message", handler);
                 },
                 removeEventListener(_type: "message", handler: (ev: MessageEvent) => void) {
-                    worker.removeEventListener("message", handler);
+                    pendingListeners.delete(handler);
+                    if (worker) worker.removeEventListener("message", handler);
                 },
             };
             const remoteEndpoint = {
-                postMessage(msg: any) { worker.postMessage(msg); },
+                postMessage(msg: any) { 
+                    if (worker) {
+                        worker.postMessage(msg);
+                    } else {
+                        pendingOutboundMessages.push(msg);
+                    }
+                },
             };
 
             const transport = createPostMessageTransport(
@@ -52,6 +56,19 @@ export async function registerWebExecutor(
             peer.setTransport(transport);
             await peer.start();
 
+            // NOW create the worker after everything is set up
+            worker = new Worker(
+                `/@${ctx.exe}?pid=${ctx.pid}&mimeType=application/javascript`,
+                { type: "module" }
+            );
+            for (const handler of pendingListeners) {
+                worker.addEventListener("message", handler);
+            }
+            for (const msg of pendingOutboundMessages.splice(0, pendingOutboundMessages.length)) {
+                worker.postMessage(msg);
+            }
+            workers.set(ctx.pid, worker);
+
             const cleanupWorker = (reason: string) => {
                 const w = workers.get(ctx.pid);
                 if (!w) return;
@@ -63,13 +80,13 @@ export async function registerWebExecutor(
             worker.addEventListener("message", () => { });
 
             worker.addEventListener("error", async (e) => {
-                console.error(`[executor] pid=${ctx.pid} worker error:`, e.message);
+                console.error(`[executor] pid=${ctx.pid} worker error event:`, e);
                 cleanupWorker("error");
                 await system["party.openv.impl.process.exitProcess"](ctx.pid, 1).catch(() => { });
             });
 
             worker.addEventListener("messageerror", async (e) => {
-                console.error(`[executor] pid=${ctx.pid} worker messageerror:`, e);
+                console.error(`[executor] pid=${ctx.pid} worker messageerror event:`, e.data);
                 cleanupWorker("messageerror");
                 await system["party.openv.impl.process.exitProcess"](ctx.pid, 1).catch(() => { });
             });

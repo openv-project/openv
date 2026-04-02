@@ -12,6 +12,7 @@ import {
   ClientOpEnv,
   CoreFSExt,
   CoreProcessExt,
+  CoreSyncComponent,
   ProcessScopedFS,
   ProcessScopedProcess,
   ProcessScopedRegistry,
@@ -62,27 +63,47 @@ await registerWebExecutor(openv.system, async (ctx) => {
   const scopedFs = new ProcessScopedFS(ctx.pid, openv.system as any);
   if (ctx.stdioOfds) {
     for (let i = 0; i < ctx.stdioOfds.length; i++) {
-      const ofd = ctx.stdioOfds[i];
-      if (ofd !== undefined) {
-        await scopedFs["party.openv.filesystem.local.setfd"](i, ofd);
+      const ofdValue = ctx.stdioOfds[i];
+      if (ofdValue !== undefined) {
+        try {
+          await scopedFs["party.openv.filesystem.local.setfd"](i, ofdValue);
+        } catch (err) {
+          console.error(`[buildEnv] pid=${ctx.pid} failed to set fd ${i}:`, err);
+          throw err;
+        }
       }
     }
   }
 
+  const exports: Record<string, Function> = {};
+  const sync = new CoreSyncComponent((method: string) => exports[method] as any);
   const scopedRegistry = new ProcessScopedRegistry(ctx.pid, openv.system as any);
   const scopedProcess = new ProcessScopedProcess(ctx.pid, openv.system as any);
+  const scopedComponents = [scopedFs, scopedProcess, scopedRegistry, sync] as const;
 
-  const exports: Record<string, Function> = {};
-  for (const scoped of [scopedFs, scopedProcess, scopedRegistry]) {
+  const methodsBySource: Record<string, string[]> = { scopedFs: [], scopedProcess: [], scopedRegistry: [], sync: [] };
+  for (const scoped of scopedComponents) {
     let proto = Object.getPrototypeOf(scoped);
     while (proto && proto !== Object.prototype) {
       for (const name of Object.getOwnPropertyNames(proto)) {
-        if (name === "constructor" || name === "supports" || exports[name]) continue;
+        if (name === "constructor" || exports[name]) continue;
         const value = (scoped as any)[name];
         if (typeof value === "function") exports[name] = value.bind(scoped);
+        const sourceName = scoped === scopedFs ? "scopedFs" : scoped === scopedProcess ? "scopedProcess" : scoped === sync ? "sync" : "scopedRegistry";
+        methodsBySource[sourceName].push(name);
       }
       proto = Object.getPrototypeOf(proto);
     }
+  }
+
+  exports.supports = async (ns: string): Promise<string | null> => {
+    for (const scoped of scopedComponents) {
+      if (typeof (scoped as any).supports === "function") {
+        const result = await (scoped as any).supports(ns);
+        if (result) return result;
+      }
+    }
+    return null;
   }
   return exports;
 });
@@ -206,7 +227,7 @@ const runCommand = async (line) => {
     return;
   }
   if (line === "help") {
-    await writeOut("commands: help, echo <text>, pwd, exit\\r\\n");
+    await writeOut("commands: help, echo <text>, pwd, run <exe> <json-args>, exit\\r\\n");
     return;
   }
   if (line === "pwd") {
@@ -216,6 +237,40 @@ const runCommand = async (line) => {
   }
   if (line.startsWith("echo ")) {
     await writeOut(line.slice(5) + "\\r\\n");
+    return;
+  }
+  if (line.startsWith("run ")) {
+    const payload = line.slice(4).trim();
+    const sep = payload.indexOf(" ");
+    if (sep === -1) {
+      await writeOut("usage: run <exe> <json-array>\\r\\n");
+      return;
+    }
+
+    const exe = payload.slice(0, sep).trim();
+    const jsonArg = payload.slice(sep + 1).trim();
+
+    let argv = [];
+    try {
+      const parsed = JSON.parse(jsonArg);
+      if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) {
+        throw new Error("args must be a json array of strings");
+      }
+      argv = parsed;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await writeOut("run parse error: " + message + "\\r\\n");
+      return;
+    }
+
+    try {
+      const pid = await openv.system["party.openv.process.spawn"](exe, [exe, ...argv]);
+      const exitCode = await openv.system["party.openv.process.wait"](pid);
+      await writeOut("[run exit: " + (exitCode === null ? "killed" : exitCode) + "]\\r\\n");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await writeOut("run failed: " + message + "\\r\\n");
+    }
     return;
   }
   await writeOut("unknown command: " + line + "\\r\\n");

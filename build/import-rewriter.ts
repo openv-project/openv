@@ -17,6 +17,8 @@ const PKG_MAP: Record<string, PackageConfig> = {
 export const importRewriter: Plugin = {
     name: "import-rewriter",
     setup(build) {
+        build.onResolve({ filter: /^\/@\// }, (args) => ({ path: args.path, external: true }));
+
         const pkgNames = Object.keys(PKG_MAP).map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
         const filter = new RegExp(`^(${pkgNames})|^party\\.openv\\.api\\.`);
         

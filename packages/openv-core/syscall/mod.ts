@@ -3,3 +3,4 @@ export * from "./fs.ts";
 export * from "./registry.ts";
 export * from "./process/mod.ts";
 export * from "./script.ts";
+export * from "./sync.ts";
