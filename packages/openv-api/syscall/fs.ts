@@ -2,6 +2,7 @@ import { PlainParameter } from "../mod.ts";
 import type { SystemComponent } from "./mod.ts";
 
 export type OpenFlags = "r" | "a" | "ax" | "a+" | "r+" | "w" | "wx" | "w+" | "wx+"
+export type SeekWhence = "set" | "cur" | "end";
 
 export type FileMode = number;
 
@@ -93,6 +94,8 @@ export interface FileSystemCoreComponent extends SystemComponent<FS_NAMESPACE_VE
      * Close a previously opened file. Accepts the same kind of number that `open` returned.
      */
     ["party.openv.filesystem.close"](fd: number): Promise<void>;
+    
+    ["party.openv.filesystem.lseek"](fd: number, offset?: number, whence?: SeekWhence): Promise<number>;
 }
 
 /**
@@ -280,6 +283,7 @@ export interface FileSystemVirtualComponent extends SystemComponent<FS_VIRTUAL_N
     }>): Promise<void>;
     ["party.openv.filesystem.virtual.onioctl"](id: string, handler: (ofd: number, request: string, argument?: PlainParameter) => Promise<PlainParameter>): Promise<void>;
     ["party.openv.filesystem.virtual.onsync"](id: string, handler: (ofd: number) => Promise<void>): Promise<void>;
+    ["party.openv.filesystem.virtual.onseek"]?(id: string, handler: (ofd: number, offset?: number, whence?: SeekWhence) => Promise<number>): Promise<void>;
 }
 
 export type FS_SYNC_NAMESPACE = "party.openv.filesystem.sync";

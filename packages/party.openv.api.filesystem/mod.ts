@@ -70,6 +70,8 @@ export interface FileHandle {
   readonly fd: number;
   read(buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<{ bytesRead: number; buffer: Uint8Array }>;
   write(buffer: Uint8Array, offset?: number, length?: number, position?: number | null): Promise<{ bytesWritten: number; buffer: Uint8Array }>;
+  seek(offset?: number, whence?: "set" | "cur" | "end"): Promise<number>;
+  tell(): Promise<number>;
   writeFile(data: string | Uint8Array, options?: WriteFileOptions): Promise<void>;
   readFile(options?: ReadFileOptions & { encoding?: null }): Promise<Uint8Array>;
   readFile(options: ReadFileOptions & { encoding: BufferEncoding }): Promise<string>;
@@ -168,6 +170,14 @@ export default class FsApi implements API<"party.openv.api.filesystem"> {
         return { bytesWritten, buffer };
       },
 
+      async seek(offset = 0, whence = "cur") {
+        return sys["party.openv.filesystem.lseek"](fd, offset, whence);
+      },
+
+      async tell() {
+        return sys["party.openv.filesystem.lseek"](fd, 0, "cur");
+      },
+
       async writeFile(data, _options) {
         const encoded = typeof data === "string" ? new TextEncoder().encode(data) : data;
         await sys["party.openv.filesystem.write.write"]!(fd, encoded, 0, encoded.byteLength, 0);
@@ -222,6 +232,10 @@ export default class FsApi implements API<"party.openv.api.filesystem"> {
     } finally {
       await this.openv.system["party.openv.filesystem.close"](fd);
     }
+  }
+
+  async lseek(fd: number, offset = 0, whence: "set" | "cur" | "end" = "cur"): Promise<number> {
+    return this.openv.system["party.openv.filesystem.lseek"](fd, offset, whence);
   }
 
   async appendFile(

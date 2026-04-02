@@ -1,4 +1,4 @@
-import type { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemIoctlComponent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemSocketComponent, FileSystemSocketType, FileSystemSyncComponent, FileSystemVirtualComponent, FS_IOCTL_NAMESPACE, FS_IOCTL_NAMESPACE_VERSIONED, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_SOCKET_NAMESPACE, FS_SOCKET_NAMESPACE_VERSIONED, FS_SYNC_NAMESPACE, FS_SYNC_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, PlainParameter, ProcessComponent, SocketAddress, SystemComponent } from "@openv-project/openv-api"
+import type { FileMode, FileSystemCoreComponent, FileSystemEvent, FileSystemIoctlComponent, FileSystemLocalComponent, FileSystemPipeComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemSocketComponent, FileSystemSocketType, FileSystemSyncComponent, FileSystemVirtualComponent, FS_IOCTL_NAMESPACE, FS_IOCTL_NAMESPACE_VERSIONED, FS_LOCAL_NAMESPACE, FS_LOCAL_NAMESPACE_VERSIONED, FS_NAMESPACE, FS_NAMESPACE_VERSIONED, FS_PIPE_NAMESPACE, FS_PIPE_NAMESPACE_VERSIONED, FS_READ_NAMESPACE, FS_READ_NAMESPACE_VERSIONED, FS_SOCKET_NAMESPACE, FS_SOCKET_NAMESPACE_VERSIONED, FS_SYNC_NAMESPACE, FS_SYNC_NAMESPACE_VERSIONED, FS_VIRTUAL_NAMESPACE, FS_VIRTUAL_NAMESPACE_VERSIONED, FS_WRITE_NAMESPACE, FS_WRITE_NAMESPACE_VERSIONED, FsStats, OpenFlags, PlainParameter, ProcessComponent, SeekWhence, SocketAddress, SystemComponent } from "@openv-project/openv-api"
 import { CoreProcessExt } from "./mod";
 
 type VFS = {
@@ -10,22 +10,23 @@ type VFS = {
     read: (ofd: number, length: number, position?: number) => Promise<Uint8Array>;
     write: (ofd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null) => Promise<number>;
     stat: (path: string) => Promise<FsStats>;
-    lstat?: (path: string) => Promise<FsStats>;
-    readlink?: (path: string) => Promise<string>;
+    lstat: (path: string) => Promise<FsStats>;
+    readlink: (path: string) => Promise<string>;
     readdir: (path: string) => Promise<string[]>;
     mkdir: (path: string, mode?: FileMode) => Promise<void>;
     rmdir: (path: string) => Promise<void>;
     rename: (oldPath: string, newPath: string) => Promise<void>;
     unlink: (path: string) => Promise<void>;
-    symlink?: (target: string, path: string, mode?: FileMode) => Promise<void>;
-    chmod?: (path: string, mode: FileMode) => Promise<void>;
-    chown?: (path: string, uid: number, gid: number) => Promise<void>;
+    symlink: (target: string, path: string, mode?: FileMode) => Promise<void>;
+    chmod: (path: string, mode: FileMode) => Promise<void>;
+    chown: (path: string, uid: number, gid: number) => Promise<void>;
     watch: (path: string, options?: { recursive?: boolean }) => Promise<{
         events: AsyncIterable<FileSystemEvent>;
         abort: () => Promise<void>;
     }>;
     ioctl: (ofd: number, request: string, argument?: PlainParameter) => Promise<PlainParameter>;
     sync: (ofd: number) => Promise<void>;
+    seek: (ofd: number, offset?: number, whence?: SeekWhence) => Promise<number>;
 };
 
 const CORE_FS_EXT_NAMESPACE = "party.openv.impl.filesystem" as const;
@@ -105,6 +106,10 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
     async ["party.openv.filesystem.virtual.onsync"](id: string, handler: (ofd: number) => Promise<void>): Promise<void> {
         const vfs = this.#getVfs(id);
         vfs.sync = handler;
+    }
+    async ["party.openv.filesystem.virtual.onseek"](id: string, handler: (ofd: number, offset?: number, whence?: SeekWhence) => Promise<number>): Promise<void> {
+        const vfs = this.#getVfs(id);
+        vfs.seek = handler;
     }
 
     async ["party.openv.filesystem.write.create"](path: string, mode?: FileMode): Promise<void> {
@@ -198,6 +203,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             path: `<socket:${socketId}>`,
             flags: "r+",
             mode: S_IFSOCK | 0o777,
+            position: 0,
             ownerUid: null,
         });
 
@@ -280,6 +286,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             path: `<socket:${serverSocketId}:accepted>`,
             flags: "r+",
             mode: S_IFSOCK | 0o777,
+            position: 0,
             ownerUid: null,
         });
         this.#ofdToSocket.set(acceptedOfd, {
@@ -404,7 +411,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         if (!entry.provider || typeof entry.provider.write !== "function") {
             throw new Error(`Open file number ${ofd} is not backed by a provider that supports write.`);
         }
-        return entry.provider.write(ofd, buffer, offset, length, position);
+        const effectivePosition = position == null ? entry.position : position;
+        const written = await entry.provider.write(ofd, buffer, offset, length, effectivePosition);
+        if (position == null) {
+            entry.position += written;
+        }
+        return written;
     }
 
     // Map of mountpoint -> vfs id
@@ -830,7 +842,12 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         if (!entry.provider || typeof entry.provider.read !== "function") {
             throw new Error(`Open file number ${ofd} is not backed by a provider that supports read.`);
         }
-        return entry.provider.read(ofd, length, position);
+        const effectivePosition = position === undefined ? entry.position : position;
+        const chunk = await entry.provider.read(ofd, length, effectivePosition);
+        if (position === undefined) {
+            entry.position += chunk.byteLength;
+        }
+        return chunk;
     }
 
 
@@ -907,8 +924,57 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         provider?: Partial<VFS>;
         flags: OpenFlags;
         mode: FileMode;
+        position: number;
         ownerUid?: number | null;
     }> = new Map();
+
+    async ["party.openv.filesystem.lseek"](ofd: number, offset = 0, whence: SeekWhence = "cur"): Promise<number> {
+        if (this.#ofdToPipe.has(ofd)) {
+            throw new Error(`ESPIPE: illegal seek on pipe OFD ${ofd}`);
+        }
+        if (this.#ofdToSocket.has(ofd)) {
+            throw new Error(`ESPIPE: illegal seek on socket OFD ${ofd}`);
+        }
+
+        const entry = this.#ofdTable.get(ofd);
+        if (!entry) {
+            throw new Error(`Invalid open file number ${ofd}`);
+        }
+
+        if (entry.provider?.seek) {
+            const next = await entry.provider.seek(ofd, offset, whence);
+            if (!Number.isFinite(next) || next < 0) {
+                throw new Error(`EINVAL: invalid seek result ${next}`);
+            }
+            entry.position = Math.trunc(next);
+            return entry.position;
+        }
+
+        let base = 0;
+        switch (whence) {
+            case "set":
+                base = 0;
+                break;
+            case "cur":
+                base = entry.position;
+                break;
+            case "end":
+                if (!entry.provider || typeof entry.provider.stat !== "function") {
+                    enosys(`virtual filesystem seek end for "${entry.providerId ?? "unknown"}"`);
+                }
+                base = (await entry.provider.stat(entry.path)).size;
+                break;
+            default:
+                throw new Error(`EINVAL: invalid whence '${String(whence)}'`);
+        }
+
+        const next = Math.trunc(base + offset);
+        if (!Number.isFinite(next) || next < 0) {
+            throw new Error(`EINVAL: invalid seek target ${next}`);
+        }
+        entry.position = next;
+        return next;
+    }
 
     async ["party.openv.filesystem.open"](path: string, flags: OpenFlags, mode: FileMode): Promise<number> {
         const normalized = await this.#resolvePathWithSymlinks(path);
@@ -945,6 +1011,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             provider,
             flags,
             mode,
+            position: 0,
             ownerUid: null,
         });
         return ofd;
@@ -1305,12 +1372,14 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             path: `<pipe:${pipeId}:read>`,
             flags: "r",
             mode: 0,
+            position: 0,
             ownerUid: null,
         });
         this.#ofdTable.set(writeOfd, {
             path: `<pipe:${pipeId}:write>`,
             flags: "w",
             mode: 0,
+            position: 0,
             ownerUid: null,
         });
 
@@ -1375,6 +1444,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             path: fifo.path ?? `<fifo:${fifo.id}>`,
             flags,
             mode: fifo.mode,
+            position: 0,
             ownerUid: null,
         });
         this.#ofdToPipe.set(ofd, { kind: "fifo", fifoId, canRead, canWrite });
@@ -2029,6 +2099,11 @@ export class ProcessScopedFS implements
         const ofd = this.#resolveOfd(fd);
         this.#fdToOfd.delete(fd);
         await this.#system["party.openv.impl.filesystem.closeByOfd"](ofd);
+    }
+
+    async ["party.openv.filesystem.lseek"](fd: number, offset = 0, whence: SeekWhence = "cur"): Promise<number> {
+        const ofd = this.#resolveOfd(fd);
+        return this.#system["party.openv.filesystem.lseek"](ofd, offset, whence);
     }
 
     async ["party.openv.filesystem.read.stat"](path: string): Promise<FsStats> {
