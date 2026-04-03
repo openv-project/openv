@@ -236,6 +236,18 @@ export class OPFS {
 		await system["party.openv.filesystem.virtual.onrename"](OPFS_NAMESPACE,
 			async (oldPath: string, newPath: string) => await this.#runSerialized(async () => await this.rename(normalizePath(oldPath), normalizePath(newPath)))
 		);
+		await system["party.openv.filesystem.virtual.ontruncate"]?.(OPFS_NAMESPACE,
+			async (path: string, length: number) => await this.#runSerialized(async () => await this.truncate(normalizePath(path), length))
+		);
+		await system["party.openv.filesystem.virtual.onftruncate"]?.(OPFS_NAMESPACE,
+			async (ofd: number, length: number) => await this.#runSerialized(async () => await this.ftruncate(ofd, length))
+		);
+		await system["party.openv.filesystem.virtual.onsettimes"]?.(OPFS_NAMESPACE,
+			async (path: string, atim: number, mtim: number, ctim: number) => await this.#runSerialized(async () => await this.settimes(normalizePath(path), atim, mtim, ctim))
+		);
+		await system["party.openv.filesystem.virtual.onlsettimes"]?.(OPFS_NAMESPACE,
+			async (path: string, atim: number, mtim: number, ctim: number) => await this.#runSerialized(async () => await this.lsettimes(normalizePath(path), atim, mtim, ctim))
+		);
 	}
 
 	closestMountpoint(path: string): string | null {
@@ -807,6 +819,97 @@ export class OPFS {
 		return src.length;
 	}
 
+	async truncate(path: string, length: number): Promise<void> {
+		const resolved = this.#resolvePath(path);
+		if (!resolved || resolved.relativePath === "/") {
+			throw new Error(`EISDIR: illegal operation on a directory, truncate '${path}'`);
+		}
+		if (!Number.isFinite(length) || length < 0) {
+			throw new Error(`EINVAL: invalid truncate length '${length}'`);
+		}
+		const parentRel = parentPath(resolved.relativePath);
+		const segment = baseName(resolved.relativePath);
+		const wireName = marshalName(segment);
+		const parent = await this.#getDirectoryHandleByRelativePath(resolved.mount, parentRel);
+		const kind = await this.#entryKind(parent, wireName);
+		if (!kind) {
+			throw new Error(`ENOENT: no such file or directory, truncate '${path}'`);
+		}
+		if (kind !== "FILE") {
+			throw new Error(`EISDIR: illegal operation on a directory, truncate '${path}'`);
+		}
+		const fileHandle = await parent.getFileHandle(wireName);
+		const writable = await fileHandle.createWritable();
+		await writable.truncate(Math.trunc(length));
+		await writable.close();
+		await this.#touchFileMetadata(parent, wireName, true, true);
+	}
+
+	async ftruncate(ofd: number, length: number): Promise<void> {
+		const open = this.#openFiles.get(ofd);
+		if (!open) {
+			throw new Error(`EBADF: bad file descriptor, ftruncate '${ofd}'`);
+		}
+		if (!canWrite(open.flags)) {
+			throw new Error(`EBADF: file not open for writing, ftruncate '${ofd}'`);
+		}
+		if (!Number.isFinite(length) || length < 0) {
+			throw new Error(`EINVAL: invalid truncate length '${length}'`);
+		}
+		const parentRel = parentPath(open.path);
+		const segment = baseName(open.path);
+		const wireName = marshalName(segment);
+		const parent = await this.#getDirectoryHandleByRelativePath(open.mount, parentRel);
+		const fileHandle = await this.#tryGetFileHandle(parent, wireName);
+		if (!fileHandle) {
+			throw new Error(`ENOENT: no such file or directory, ftruncate '${ofd}'`);
+		}
+		const writable = await fileHandle.createWritable();
+		await writable.truncate(Math.trunc(length));
+		await writable.close();
+		if (open.position > length) {
+			open.position = Math.trunc(length);
+		}
+		await this.#touchFileMetadata(parent, wireName, true, true);
+	}
+
+	async settimes(path: string, atim: number, mtim: number, ctim: number): Promise<void> {
+		const resolved = this.#resolvePath(path);
+		if (!resolved || resolved.relativePath === "/") {
+			throw new Error(`ENOENT: no such file or directory, settimes '${path}'`);
+		}
+		const parentRel = parentPath(resolved.relativePath);
+		const segment = baseName(resolved.relativePath);
+		const wireName = marshalName(segment);
+		const parent = await this.#getDirectoryHandleByRelativePath(resolved.mount, parentRel);
+		const attrs = await this.#readAttrs(parent);
+		const prev = attrs[wireName];
+		if (!prev) {
+			const kind = await this.#entryKind(parent, wireName);
+			if (!kind) {
+				throw new Error(`ENOENT: no such file or directory, settimes '${path}'`);
+			}
+			attrs[wireName] = {
+				...defaultEntry(kind, kind === "FILE" ? 0o666 : kind === "DIRECTORY" ? 0o777 : 0o120777),
+				atime: atim,
+				mtime: mtim,
+				ctime: ctim,
+			};
+		} else {
+			attrs[wireName] = {
+				...prev,
+				atime: atim,
+				mtime: mtim,
+				ctime: ctim,
+			};
+		}
+		await this.#writeAttrs(parent, attrs);
+	}
+
+	async lsettimes(path: string, atim: number, mtim: number, ctim: number): Promise<void> {
+		await this.settimes(path, atim, mtim, ctim);
+	}
+
 	async #copyEntry(
 		srcParent: FileSystemDirectoryHandle,
 		srcName: string,
@@ -1045,4 +1148,15 @@ export class OPFS {
 		};
 		await this.#writeAttrs(parent, attrs);
 	}
+
+	supports(ns: "party.openv.impl.opfs"): Promise<"party.openv.impl.opfs/0.1.0">;
+	supports(ns: "party.openv.impl.opfs/0.1.0"): Promise<"party.openv.impl.opfs/0.1.0">;
+	async supports(ns: string): Promise<string | null> {
+		if (ns === "party.openv.impl.opfs" || ns === "party.openv.impl.opfs/0.1.0") {
+			return "party.openv.impl.opfs/0.1.0";
+		}
+		return null;
+	}
 }
+
+export type OpfsSystemComponent = import("@openv-project/openv-api").SystemComponent<"party.openv.impl.opfs/0.1.0", "party.openv.impl.opfs">;

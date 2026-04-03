@@ -94,6 +94,8 @@ export class CoreSyncComponent implements SyncComponent {
         let responseKind = RESPONSE_KIND_JSON_OK;
         let responsePayload: Uint8Array = new Uint8Array(0);
 
+        let destroyId: number | undefined;
+        let shouldDestroy = false;
         try {
             const resolvedArgs = args.map((arg) => this.#resolveArg(arg, ringBytes));
             const methodName = String(method);
@@ -157,10 +159,12 @@ export class CoreSyncComponent implements SyncComponent {
         Atomics.notify(meta, 0, 1);
 
         if (destroy) {
-            const id = typeof sabOrId === "number" ? sabOrId : this.#bufferIds.get(sab);
-            if (id !== undefined) {
-                await this["party.openv.sync.destroyBuffer"](id);
-            }
+            destroyId = typeof sabOrId === "number" ? sabOrId : this.#bufferIds.get(sab);
+            shouldDestroy = true;
+        }
+
+        if (shouldDestroy && destroyId !== undefined) {
+            await this["party.openv.sync.destroyBuffer"](destroyId);
         }
     }
 

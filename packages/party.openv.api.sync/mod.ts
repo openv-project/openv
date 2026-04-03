@@ -24,13 +24,13 @@ type BinaryLike = Uint8Array | ArrayBuffer | ArrayBufferView;
 
 export type SyncBlockingClientOptions = {
   bufferSize?: number;
-  timeoutMs?: number;
+  timeoutMs?: number | null;
   reuseBuffer?: boolean;
 };
 
 type NormalizedOptions = {
   bufferSize: number;
-  timeoutMs: number;
+  timeoutMs: number | null;
   reuseBuffer: boolean;
 };
 
@@ -43,14 +43,16 @@ const DEFAULT_OPTIONS: NormalizedOptions = {
 function normalizeOptions(options?: SyncBlockingClientOptions): NormalizedOptions {
   const merged: NormalizedOptions = {
     bufferSize: options?.bufferSize ?? DEFAULT_OPTIONS.bufferSize,
-    timeoutMs: options?.timeoutMs ?? DEFAULT_OPTIONS.timeoutMs,
+    timeoutMs: options && Object.prototype.hasOwnProperty.call(options, "timeoutMs")
+      ? (options.timeoutMs ?? null)
+      : DEFAULT_OPTIONS.timeoutMs,
     reuseBuffer: options?.reuseBuffer ?? DEFAULT_OPTIONS.reuseBuffer,
   };
   if (!Number.isInteger(merged.bufferSize) || merged.bufferSize <= HEADER_BYTES) {
     throw new Error(`bufferSize must be an integer greater than ${HEADER_BYTES}`);
   }
-  if (!Number.isInteger(merged.timeoutMs) || merged.timeoutMs < 0) {
-    throw new Error("timeoutMs must be a non-negative integer");
+  if (merged.timeoutMs !== null && (!Number.isInteger(merged.timeoutMs) || merged.timeoutMs < 0)) {
+    throw new Error("timeoutMs must be null or a non-negative integer");
   }
   return merged;
 }
@@ -218,7 +220,9 @@ export class SyncBlockingClient {
       ...encodedArgs,
     );
 
-    const waitResult = Atomics.wait(this.#meta, 0, STATE_REQUEST_READY, this.#options.timeoutMs);
+    const waitResult = this.#options.timeoutMs === null
+      ? Atomics.wait(this.#meta, 0, STATE_REQUEST_READY)
+      : Atomics.wait(this.#meta, 0, STATE_REQUEST_READY, this.#options.timeoutMs);
     if (waitResult === "timed-out") {
       throw new Error(`blocking sync call timed out after ${this.#options.timeoutMs}ms`);
     }

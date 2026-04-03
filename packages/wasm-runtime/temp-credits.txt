@@ -1,0 +1,4 @@
+TEMPORARY, FOR EASE OF DEV
+
+skel/usr/bin/rustpython.wasm from https://github.com/RustPython/RustPython
+statically compiled and placed in skel for testing

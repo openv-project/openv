@@ -27,7 +27,35 @@ type VFS = {
     ioctl: (ofd: number, request: string, argument?: PlainParameter) => Promise<PlainParameter>;
     sync: (ofd: number) => Promise<void>;
     seek: (ofd: number, offset?: number, whence?: SeekWhence) => Promise<number>;
+    truncate: (path: string, length: number) => Promise<void>;
+    ftruncate: (fd: number, length: number) => Promise<void>;
+    settimes: (path: string, atim: number, mtim: number, ctim: number) => Promise<void>;
+    lsettimes: (path: string, atim: number, mtim: number, ctim: number) => Promise<void>;
 };
+
+type TtyMode = {
+    echo: boolean;
+    canonical: boolean;
+    signals: boolean;
+    extended: boolean;
+};
+
+type TtyState = {
+    mode: TtyMode;
+    windowSize: { cols: number; rows: number };
+};
+
+function defaultTtyState(): TtyState {
+    return {
+        mode: {
+            echo: true,
+            canonical: true,
+            signals: true,
+            extended: true,
+        },
+        windowSize: { cols: 80, rows: 24 },
+    };
+}
 
 const CORE_FS_EXT_NAMESPACE = "party.openv.impl.filesystem" as const;
 const CORE_FS_EXT_NAMESPACE_VERSIONED = "party.openv.impl.filesystem/0.1.0" as const;
@@ -78,6 +106,116 @@ export interface CoreFSExt extends SystemComponent<typeof CORE_FS_EXT_NAMESPACE_
 }
 
 export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemPipeComponent, FileSystemSocketComponent, FileSystemIoctlComponent, FileSystemSyncComponent, CoreFSExt {
+    async ["party.openv.filesystem.write.truncate"](path: string, length: number): Promise<void> {
+        const normalized = this.#normalizePath(path);
+        const normalizedLength = Math.trunc(length);
+        if (!Number.isFinite(normalizedLength) || normalizedLength < 0) {
+            throw new Error(`EINVAL: invalid truncate length '${length}'`);
+        }
+        if (this.#fifoByPath.has(normalized) || this.#socketPathToId.has(normalized)) {
+            throw new Error(`EINVAL: invalid argument, truncate '${normalized}'`);
+        }
+        const resolved = this.#resolveMountPath(path);
+        if (!resolved) {
+            throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
+        }
+        const { id } = resolved;
+        const provider = this.#vfsTable.get(id);
+        if (!provider || !provider.truncate) {
+            enosys(`virtual filesystem "${id}" truncate`);
+        }
+        await provider.truncate(path, normalizedLength);
+    }
+    async ["party.openv.filesystem.write.ftruncate"](fd: number, length: number): Promise<void> {
+        const normalizedLength = Math.trunc(length);
+        if (!Number.isFinite(normalizedLength) || normalizedLength < 0) {
+            throw new Error(`EINVAL: invalid truncate length '${length}'`);
+        }
+        if (this.#ofdToPipe.has(fd) || this.#ofdToSocket.has(fd)) {
+            throw new Error(`EINVAL: invalid argument, ftruncate '${fd}'`);
+        }
+        const entry = this.#ofdTable.get(fd);
+        if (!entry) throw new Error(`Invalid open file number ${fd}`);
+        if (!entry.provider) {
+            throw new Error(`Open file number ${fd} is not backed by a provider that supports ftruncate.`);
+        }
+        if (typeof entry.provider.ftruncate === "function") {
+            await entry.provider.ftruncate(fd, normalizedLength);
+        } else if (typeof entry.provider.truncate === "function") {
+            await entry.provider.truncate(entry.path, normalizedLength);
+        } else {
+            enosys(`virtual filesystem "${entry.providerId ?? "unknown"}" ftruncate`);
+        }
+        if (entry.position > normalizedLength) {
+            entry.position = normalizedLength;
+        }
+    }
+    async ["party.openv.filesystem.write.settimes"](path: string, atim: number, mtim: number, ctim: number): Promise<void> {
+        const normalized = this.#normalizePath(path);
+        const fifoId = this.#fifoByPath.get(normalized);
+        if (fifoId !== undefined) {
+            const fifo = this.#fifoTable.get(fifoId);
+            if (!fifo) throw new Error(`ENOENT: no such file or directory, settimes '${normalized}'`);
+            fifo.atime = atim;
+            fifo.mtime = mtim;
+            fifo.ctime = ctim;
+            return;
+        }
+        const socketId = this.#socketPathToId.get(normalized);
+        if (socketId !== undefined) {
+            const socket = this.#socketTable.get(socketId);
+            if (!socket) throw new Error(`ENOENT: no such file or directory, settimes '${normalized}'`);
+            socket.atime = atim;
+            socket.mtime = mtim;
+            socket.ctime = ctim;
+            return;
+        }
+        const resolved = this.#resolveMountPath(path);
+        if (!resolved) {
+            throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
+        }
+        const { id } = resolved;
+        const provider = this.#vfsTable.get(id);
+        if (!provider || !provider.settimes) {
+            enosys(`virtual filesystem "${id}" settimes`);
+        }
+        await provider.settimes(path, atim, mtim, ctim);
+    }
+    async ["party.openv.filesystem.write.lsettimes"](path: string, atim: number, mtim: number, ctim: number): Promise<void> {
+        const normalized = this.#normalizePath(path);
+        const fifoId = this.#fifoByPath.get(normalized);
+        if (fifoId !== undefined) {
+            const fifo = this.#fifoTable.get(fifoId);
+            if (!fifo) throw new Error(`ENOENT: no such file or directory, lsettimes '${normalized}'`);
+            fifo.atime = atim;
+            fifo.mtime = mtim;
+            fifo.ctime = ctim;
+            return;
+        }
+        const socketId = this.#socketPathToId.get(normalized);
+        if (socketId !== undefined) {
+            const socket = this.#socketTable.get(socketId);
+            if (!socket) throw new Error(`ENOENT: no such file or directory, lsettimes '${normalized}'`);
+            socket.atime = atim;
+            socket.mtime = mtim;
+            socket.ctime = ctim;
+            return;
+        }
+        const resolved = this.#resolveMountPath(path);
+        if (!resolved) {
+            throw new Error(`No mountpoint found for path "${path}". Use mount to attach a virtual filesystem.`);
+        }
+        const { id } = resolved;
+        const provider = this.#vfsTable.get(id);
+        if (!provider || (!provider.lsettimes && !provider.settimes)) {
+            enosys(`virtual filesystem "${id}" lsettimes`);
+        }
+        if (provider.lsettimes) {
+            await provider.lsettimes(path, atim, mtim, ctim);
+            return;
+        }
+        await provider.settimes!(path, atim, mtim, ctim);
+    }
     #traceSymlinkDebug = false;
     #trace(...parts: unknown[]): void {
         if (!this.#traceSymlinkDebug) return;
@@ -87,12 +225,65 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         this.#traceSymlinkDebug = !!enabled;
     }
     async ["party.openv.filesystem.ioctl.ioctl"](ofd: number, request: string, argument?: PlainParameter): Promise<PlainParameter> {
+        const pipeInfo = this.#ofdToPipe.get(ofd);
+        if (pipeInfo) {
+            if (pipeInfo.kind !== "anon") {
+                throw new Error(`ENOTTY: ioctl request '${request}' is not supported`);
+            }
+            return this.#handleTtyIoctl(pipeInfo.pipeId, request, argument);
+        }
+
         const entry = this.#ofdTable.get(ofd);
         if (!entry) throw new Error(`Invalid open file number ${ofd}`);
         if (!entry.provider || typeof entry.provider.ioctl !== "function") {
             throw new Error(`Open file number ${ofd} does not support ioctl.`);
         }
         return entry.provider.ioctl(ofd, request, argument);
+    }
+
+    #handleTtyIoctl(pipeId: number, request: string, argument?: PlainParameter): PlainParameter {
+        let state = this.#ttyByPipe.get(pipeId);
+        if (!state) {
+            state = defaultTtyState();
+            this.#ttyByPipe.set(pipeId, state);
+        }
+
+        switch (request) {
+            case "tty.getWindowSize":
+                return { ...state.windowSize };
+            case "tty.setWindowSize": {
+                if (!argument || typeof argument !== "object") {
+                    throw new Error(`EINVAL: invalid argument for ioctl '${request}'`);
+                }
+                const { cols, rows } = argument as { cols?: unknown; rows?: unknown };
+                if (!Number.isInteger(cols) || !Number.isInteger(rows) || (cols as number) <= 0 || (rows as number) <= 0) {
+                    throw new Error(`EINVAL: invalid tty window size`);
+                }
+                state.windowSize = { cols: cols as number, rows: rows as number };
+                return null;
+            }
+            case "tty.getMode":
+                return { ...state.mode };
+            case "tty.setMode": {
+                if (!argument || typeof argument !== "object") {
+                    throw new Error(`EINVAL: invalid argument for ioctl '${request}'`);
+                }
+                const patch = argument as Partial<TtyMode>;
+                if (patch.echo !== undefined && typeof patch.echo !== "boolean") throw new Error(`EINVAL: invalid tty.echo`);
+                if (patch.canonical !== undefined && typeof patch.canonical !== "boolean") throw new Error(`EINVAL: invalid tty.canonical`);
+                if (patch.signals !== undefined && typeof patch.signals !== "boolean") throw new Error(`EINVAL: invalid tty.signals`);
+                if (patch.extended !== undefined && typeof patch.extended !== "boolean") throw new Error(`EINVAL: invalid tty.extended`);
+                state.mode = {
+                    echo: patch.echo ?? state.mode.echo,
+                    canonical: patch.canonical ?? state.mode.canonical,
+                    signals: patch.signals ?? state.mode.signals,
+                    extended: patch.extended ?? state.mode.extended,
+                };
+                return { ...state.mode };
+            }
+            default:
+                throw new Error(`ENOTTY: ioctl request '${request}' is not supported`);
+        }
     }
     async ["party.openv.filesystem.sync.sync"](ofd: number): Promise<void> {
         const entry = this.#ofdTable.get(ofd);
@@ -1169,6 +1360,26 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         vfs.chown = handler;
     }
 
+    async ["party.openv.filesystem.virtual.ontruncate"](id: string, handler: (path: string, length: number) => Promise<void>): Promise<void> {
+        const vfs = this.#getVfs(id);
+        vfs.truncate = handler;
+    }
+
+    async ["party.openv.filesystem.virtual.onftruncate"](id: string, handler: (ofd: number, length: number) => Promise<void>): Promise<void> {
+        const vfs = this.#getVfs(id);
+        vfs.ftruncate = handler;
+    }
+
+    async ["party.openv.filesystem.virtual.onsettimes"](id: string, handler: (path: string, atim: number, mtim: number, ctim: number) => Promise<void>): Promise<void> {
+        const vfs = this.#getVfs(id);
+        vfs.settimes = handler;
+    }
+
+    async ["party.openv.filesystem.virtual.onlsettimes"](id: string, handler: (path: string, atim: number, mtim: number, ctim: number) => Promise<void>): Promise<void> {
+        const vfs = this.#getVfs(id);
+        vfs.lsettimes = handler;
+    }
+
     static readonly DEFAULT_PIPE_BUFFER_SIZE = 65536;
     static readonly DEFAULT_DGRAM_QUEUE_LIMIT = 128;
 
@@ -1189,6 +1400,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
         /** Resolvers for writers waiting for space. */
         pendingWriters: Array<() => void>;
     }> = new Map();
+    #ttyByPipe: Map<number, TtyState> = new Map();
 
     #pipeIdCounter = 0;
 
@@ -1364,6 +1576,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
             pendingReaders: [],
             pendingWriters: [],
         });
+        this.#ttyByPipe.set(pipeId, defaultTtyState());
 
         const readOfd = ++this.#ofdCounter;
         const writeOfd = ++this.#ofdCounter;
@@ -1811,6 +2024,7 @@ export class CoreFS implements FileSystemVirtualComponent, FileSystemCoreCompone
 
         if (pipe.readClosed && pipe.writeClosed) {
             this.#pipeTable.delete(pipeId);
+            this.#ttyByPipe.delete(pipeId);
         }
     }
 
@@ -2005,6 +2219,47 @@ export class ProcessScopedFS implements
         this.#pid = pid;
         this.#umask = umask;
     }
+    async ["party.openv.filesystem.write.truncate"](path: string, length: number): Promise<void> {
+        await this.#checkPathTraversal(path);
+        const stat = await this.#system["party.openv.filesystem.read.stat"](path);
+        const uid = await this.#getUid();
+        const gid = await this.#getGid();
+        requireAccess(stat, uid, gid, "write", path);
+        return this.#system["party.openv.filesystem.write.truncate"](path, length);
+    }
+    async ["party.openv.filesystem.write.ftruncate"](fd: number, length: number): Promise<void> {
+        const ofd = this.#resolveOfd(fd);
+        const uid = await this.#getUid();
+        if (!await this.#system["party.openv.impl.filesystem.canAccessOfd"](ofd, uid)) {
+            throw new Error(`EPERM: operation not permitted, ftruncate '${fd}'`);
+        }
+        return this.#system["party.openv.filesystem.write.ftruncate"](ofd, length);
+    }
+    async ["party.openv.filesystem.write.settimes"](path: string, atim: number, mtim: number, ctim: number): Promise<void> {
+        await this.#checkPathTraversal(path);
+        const lstat = this.#system["party.openv.filesystem.read.lstat"];
+        const stat = lstat
+            ? await lstat(path)
+            : await this.#system["party.openv.filesystem.read.stat"](path);
+        const uid = await this.#getUid();
+        if (uid !== 0 && stat.uid !== uid) {
+            throw new Error(`EPERM: operation not permitted, settimes '${path}'`);
+        }
+        return this.#system["party.openv.filesystem.write.settimes"](path, atim, mtim, ctim);
+    }
+    async ["party.openv.filesystem.write.lsettimes"](path: string, atim: number, mtim: number, ctim: number): Promise<void> {
+        await this.#checkPathTraversal(path);
+        const lstat = this.#system["party.openv.filesystem.read.lstat"];
+        const stat = lstat
+            ? await lstat(path)
+            : await this.#system["party.openv.filesystem.read.stat"](path);
+        const uid = await this.#getUid();
+        if (uid !== 0 && stat.uid !== uid) {
+            throw new Error(`EPERM: operation not permitted, lsettimes '${path}'`);
+        }
+        return this.#system["party.openv.filesystem.write.lsettimes"](path, atim, mtim, ctim);
+    }
+
     async ["party.openv.filesystem.sync.sync"](ofd: number): Promise<void> {
         const ofdGlobal = this.#fdToOfd.get(ofd);
         if (ofdGlobal === undefined) {

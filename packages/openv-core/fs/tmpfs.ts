@@ -94,6 +94,18 @@ export class TmpFs {
         system["party.openv.filesystem.virtual.onrename"](TMPFS_NAMESPACE,
             async (oldPath: string, newPath: string) => await this.rename(normalizePath(oldPath), normalizePath(newPath))
         );
+        system["party.openv.filesystem.virtual.ontruncate"]?.(TMPFS_NAMESPACE,
+            async (path: string, length: number) => await this.truncate(normalizePath(path), length)
+        );
+        system["party.openv.filesystem.virtual.onftruncate"]?.(TMPFS_NAMESPACE,
+            async (fd: number, length: number) => await this.ftruncate(fd, length)
+        );
+        system["party.openv.filesystem.virtual.onsettimes"]?.(TMPFS_NAMESPACE,
+            async (path: string, atim: number, mtim: number, ctim: number) => await this.settimes(normalizePath(path), atim, mtim, ctim)
+        );
+        system["party.openv.filesystem.virtual.onlsettimes"]?.(TMPFS_NAMESPACE,
+            async (path: string, atim: number, mtim: number, ctim: number) => await this.lsettimes(normalizePath(path), atim, mtim, ctim)
+        );
     }
 
     closestMountpoint(path: string): string | null {
@@ -489,6 +501,72 @@ export class TmpFs {
         return bytesToWrite;
     }
 
+    async truncate(path: string, length: number): Promise<void> {
+        const node = this.#paths.get(`${this.closestMountpoint(path)}\0${path}`);
+        if (node === undefined) {
+            throw new Error(`ENOENT: no such file or directory, truncate '${path}'`);
+        }
+        const stats = this.#stats.get(node);
+        const data = this.#data.get(node);
+        if (!stats || !data || Array.isArray(data)) {
+            throw new Error(`EISDIR: illegal operation on a directory, truncate '${path}'`);
+        }
+        if (!Number.isFinite(length) || length < 0) {
+            throw new Error(`EINVAL: invalid truncate length '${length}'`);
+        }
+        const nextLen = Math.trunc(length);
+        let next = this.#makeFileBuffer(nextLen);
+        next.set(data.subarray(0, Math.min(data.length, nextLen)));
+        this.#data.set(node, next);
+        stats.size = nextLen;
+        stats.mtime = Date.now();
+        stats.ctime = stats.mtime;
+    }
+
+    async ftruncate(fd: number, length: number): Promise<void> {
+        const file = this.#openFiles.get(fd);
+        if (!file) {
+            throw new Error(`EBADF: bad file descriptor, ftruncate '${fd}'`);
+        }
+        if (!file.flags.includes("w") && !file.flags.includes("+") && !file.flags.includes("a")) {
+            throw new Error(`EBADF: file not open for writing, ftruncate '${fd}'`);
+        }
+        const stats = this.#stats.get(file.node);
+        if (!stats || stats.type !== "FILE") {
+            throw new Error(`EISDIR: illegal operation on a directory, ftruncate '${fd}'`);
+        }
+        if (!Number.isFinite(length) || length < 0) {
+            throw new Error(`EINVAL: invalid truncate length '${length}'`);
+        }
+        const nextLen = Math.trunc(length);
+        const data = this.#data.get(file.node);
+        if (!data || Array.isArray(data)) {
+            throw new Error(`EISDIR: illegal operation on a directory, ftruncate '${fd}'`);
+        }
+        const next = this.#makeFileBuffer(nextLen);
+        next.set(data.subarray(0, Math.min(data.length, nextLen)));
+        this.#data.set(file.node, next);
+        stats.size = nextLen;
+        stats.mtime = Date.now();
+        stats.ctime = stats.mtime;
+        if (file.position > nextLen) file.position = nextLen;
+    }
+
+    async settimes(path: string, atim: number, mtim: number, ctim: number): Promise<void> {
+        const node = this.#paths.get(`${this.closestMountpoint(path)}\0${path}`);
+        if (node === undefined) {
+            throw new Error(`ENOENT: no such file or directory, settimes '${path}'`);
+        }
+        const stats = this.#stats.get(node)!;
+        stats.atime = atim;
+        stats.mtime = mtim;
+        stats.ctime = ctim;
+    }
+
+    async lsettimes(path: string, atim: number, mtim: number, ctim: number): Promise<void> {
+        await this.settimes(path, atim, mtim, ctim);
+    }
+
     async rename(oldPath: string, newPath: string): Promise<void> {
         const oldMount = this.closestMountpoint(oldPath);
         const newMount = this.closestMountpoint(newPath);
@@ -542,3 +620,13 @@ export class TmpFs {
         this.#stats.delete(node);
     }
 }
+
+// Provide supports() so the system can probe for the tmpfs namespace version
+(TmpFs.prototype as any).supports = async function(ns: string): Promise<string | null> {
+    if (ns === "party.openv.impl.tmpfs" || ns === "party.openv.impl.tmpfs/0.1.0") {
+        return "party.openv.impl.tmpfs/0.1.0";
+    }
+    return null;
+};
+
+export type TmpFsSystemComponent = import("@openv-project/openv-api").SystemComponent<"party.openv.impl.tmpfs/0.1.0", "party.openv.impl.tmpfs">;

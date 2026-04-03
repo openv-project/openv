@@ -1,8 +1,9 @@
 import SyncAPI, { SyncBlockingClient } from "@openv-project/api-sync";
-import { FileSystemCoreComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, OpEnv, ProcessLocalComponent } from "@openv-project/openv-api";
+import { FileSystemCoreComponent, FileSystemLocalComponent, FileSystemReadOnlyComponent, FileSystemReadWriteComponent, FileSystemSyncComponent, OpEnv, ProcessLocalComponent } from "@openv-project/openv-api";
 
 const WASI_ERRNO = {
     ESUCCESS: 0,
+    EACCES: 2,
     EBADF: 8,
     EEXIST: 20,
     EINVAL: 28,
@@ -10,6 +11,8 @@ const WASI_ERRNO = {
     ENOENT: 44,
     ENOSYS: 52,
     ENOTDIR: 54,
+    EPERM: 63,
+    ESPIPE: 70,
 };
 
 const WASI_CLOCK = {
@@ -41,10 +44,12 @@ const WASI_WHENCE = {
 export class WasiRuntime {
     #openv: OpEnv<FileSystemCoreComponent & FileSystemReadOnlyComponent & FileSystemReadWriteComponent>;
     #client: SyncBlockingClient;
+    #readClient: SyncBlockingClient;
     #getmemory: () => WebAssembly.Memory;
     #encoder: TextEncoder;
     #pathByFd = new Map<number, string>();
     #preopenPathByFd = new Map<number, string>();
+    #traceImports = false;
 
     constructor(openv: OpEnv<any>, getmemory: () => WebAssembly.Memory) {
         this.#openv = openv;
@@ -54,9 +59,19 @@ export class WasiRuntime {
 
     async init(): Promise<void> {
         this.#client = await (this.#openv.api["party.openv.api.sync"] as SyncAPI).createBlockingClient();
+        // stdin reads can legitimately block indefinitely; use a dedicated no-timeout client for reads.
+        this.#readClient = await (this.#openv.api["party.openv.api.sync"] as SyncAPI).createBlockingClient({ timeoutMs: null });
         this.#pathByFd.set(0, "/dev/stdin");
         this.#pathByFd.set(1, "/dev/stdout");
         this.#pathByFd.set(2, "/dev/stderr");
+        try {
+            this.#traceImports = this.#client.call<ProcessLocalComponent>("party.openv.process.local.getenv", "OPENV_WASI_TRACE_IMPORTS") === "1";
+        } catch {
+            this.#traceImports = false;
+        }
+
+        // for now force traceimports just for testing
+        this.#traceImports = true;
 
         try {
             const preopenFd = this.#client.call<FileSystemCoreComponent>("party.openv.filesystem.open", "/", "r", 0o444) as number;
@@ -70,6 +85,7 @@ export class WasiRuntime {
     args_get(args_ptr: number, args_buf_ptr: number): number {
         try {
             const args = this.#client.call<ProcessLocalComponent>("party.openv.process.local.getargs") as string[];
+            args.shift(); // remove wasm shim bin
             const view = new DataView(this.#getmemory().buffer);
 
             let offsetOffset = args_ptr;
@@ -90,6 +106,7 @@ export class WasiRuntime {
     args_sizes_get(argc_ptr: number, argv_buf_size_ptr: number): number {
         try {
             const args = this.#client.call<ProcessLocalComponent>("party.openv.process.local.getargs") as string[];
+            args.shift();
             const view = new DataView(this.#getmemory().buffer);
 
             view.setUint32(argc_ptr, args.length, true);
@@ -205,17 +222,51 @@ export class WasiRuntime {
 
             for (const buf of this.#iovViews(view, iovs_ptr, iovs_len)) {
                 if (buf.byteLength === 0) continue;
-                const chunk = this.#client.call<FileSystemReadOnlyComponent>("party.openv.filesystem.read.read", fd, buf.byteLength) as Uint8Array;
+                const chunk = this.#readClient.call<FileSystemReadOnlyComponent>("party.openv.filesystem.read.read", fd, buf.byteLength) as Uint8Array;
+                console.debug(`fd_read chunk: requested=${buf.byteLength}, actual=${chunk.byteLength}`, chunk);
                 if (chunk.byteLength === 0) break;
                 buf.set(chunk.subarray(0, Math.min(buf.byteLength, chunk.byteLength)));
                 totalRead += Math.min(buf.byteLength, chunk.byteLength);
                 if (chunk.byteLength < buf.byteLength) break;
             }
 
+            console.debug(`fd_read: fd=${fd}, requested=${this.#iovViews(view, iovs_ptr, iovs_len).reduce((acc, buf) => acc + buf.byteLength, 0)}, totalRead=${totalRead}`);
+
             view.setUint32(nread_ptr, totalRead, true);
             return WASI_ERRNO.ESUCCESS;
         } catch (e) {
             console.error("Error in fd_read:", e);
+            return WASI_ERRNO.EIO;
+        }
+    }
+
+    fd_readdir(fd: number, buf_ptr: number, buf_len: number, cookie: bigint, bufused_ptr: number): number {
+        throw new Error("fd_readdir is not implemented");
+    }
+
+    fd_renumber(from: number, to: number): number {
+        try {
+            if (this.#preopenPathByFd.has(from)) {
+                return WASI_ERRNO.EBADF;
+            }
+            const path = this.#pathByFd.get(from);
+            if (!path) return WASI_ERRNO.EBADF;
+            this.#client.call<FileSystemLocalComponent>("party.openv.filesystem.local.dup2", from, to);
+            this.#pathByFd.set(to, path);
+            this.#pathByFd.delete(from);
+            return WASI_ERRNO.ESUCCESS;
+        } catch (e) {
+            console.error("Error in fd_renumber:", e);
+            return WASI_ERRNO.EIO;
+        }
+    }
+
+    fd_sync(fd: number): number {
+        try {
+            this.#client.call<FileSystemSyncComponent>("party.openv.filesystem.sync.sync", fd);
+            return WASI_ERRNO.ESUCCESS;
+        } catch (e) {
+            console.error("Error in fd_sync:", e);
             return WASI_ERRNO.EIO;
         }
     }
@@ -259,8 +310,7 @@ export class WasiRuntime {
             view.setBigUint64(new_offset_ptr, BigInt(next), true);
             return WASI_ERRNO.ESUCCESS;
         } catch (e) {
-            console.error("Error in fd_seek:", e);
-            return WASI_ERRNO.EIO;
+            return this.#toWasiErrno(e, WASI_ERRNO.EIO);
         }
     }
 
@@ -271,8 +321,7 @@ export class WasiRuntime {
             view.setBigUint64(offset_ptr, BigInt(next), true);
             return WASI_ERRNO.ESUCCESS;
         } catch (e) {
-            console.error("Error in fd_tell:", e);
-            return WASI_ERRNO.EIO;
+            return this.#toWasiErrno(e, WASI_ERRNO.EIO);
         }
     }
 
@@ -284,6 +333,18 @@ export class WasiRuntime {
             return WASI_ERRNO.ESUCCESS;
         } catch (e) {
             console.error("Error in fd_fdstat_get:", e);
+            return WASI_ERRNO.EBADF;
+        }
+    }
+
+    fd_fdstat_set_flags(fd: number, flags: number): number {
+        try {
+            const view = new DataView(this.#getmemory().buffer);
+            const filetype = this.#filetypeForFd(fd);
+            this.#writeFdstat(view, 0, filetype, flags);
+            return WASI_ERRNO.ESUCCESS;
+        } catch (e) {
+            console.error("Error in fd_fdstat_set_flags:", e);
             return WASI_ERRNO.EBADF;
         }
     }
@@ -303,6 +364,18 @@ export class WasiRuntime {
             return WASI_ERRNO.ESUCCESS;
         } catch (e) {
             console.error("Error in fd_filestat_get:", e);
+            return WASI_ERRNO.EIO;
+        }
+    }
+
+    fd_filestat_set_size(fd: number, size: bigint): number {
+        try {
+            const path = this.#pathByFd.get(fd);
+            if (!path) return WASI_ERRNO.EBADF;
+            this.#client.call<FileSystemReadWriteComponent>("party.openv.filesystem.write.truncate", path, Number(size));
+            return WASI_ERRNO.ESUCCESS;
+        } catch (e) {
+            console.error("Error in fd_filestat_set_size:", e);
             return WASI_ERRNO.EIO;
         }
     }
@@ -395,6 +468,40 @@ export class WasiRuntime {
         }
     }
 
+    path_rename(old_fd: number, old_path_ptr: number, old_path_len: number, new_fd: number, new_path_ptr: number, new_path_len: number): number {
+        try {
+            const oldPath = this.#resolvePathFromFd(old_fd, old_path_ptr, old_path_len); 
+            if (!oldPath) return WASI_ERRNO.ENOTDIR;
+            // read new path from memory not fd
+            const view = new DataView(this.#getmemory().buffer);
+            const newPathRel = this.#readString(view, new_path_ptr, new_path_len);
+            const newPath = this.#normalizePath(`${this.#resolvePathFromFd(new_fd, new_path_ptr, new_path_len)}/${newPathRel}`);
+
+            this.#client.call<FileSystemReadWriteComponent>("party.openv.filesystem.write.rename", oldPath, newPath);
+            return WASI_ERRNO.ESUCCESS;
+        } catch (e) {
+            console.error("Error in path_rename:", e);
+            return WASI_ERRNO.EIO;
+        }
+    }
+
+    path_symlink(old_fd: number, old_flags: number, old_path_ptr: number, old_path_len: number, new_fd: number, new_path_ptr: number, new_path_len: number): number {
+        try {
+            const oldPath = this.#resolvePathFromFd(old_fd, old_path_ptr, old_path_len);
+            if (!oldPath) return WASI_ERRNO.ENOTDIR;
+            // read new path from memory not fd
+            const view = new DataView(this.#getmemory().buffer);
+            const newPathRel = this.#readString(view, new_path_ptr, new_path_len);
+            const newPath = this.#normalizePath(`${this.#resolvePathFromFd(new_fd, new_path_ptr, new_path_len)}/${newPathRel}`);
+
+            this.#client.call<FileSystemReadWriteComponent>("party.openv.filesystem.write.symlink", oldPath, newPath);
+            return WASI_ERRNO.ESUCCESS;
+        } catch (e) {
+            console.error("Error in path_link:", e);
+            return WASI_ERRNO.EIO;
+        }
+    }
+
     path_unlink_file(fd: number, path_ptr: number, path_len: number): number {
         try {
             const path = this.#resolvePathFromFd(fd, path_ptr, path_len);
@@ -434,8 +541,61 @@ export class WasiRuntime {
         }
     }
 
+    path_filestat_set_times(fd: number, path_ptr: number, path_len: number, atim: bigint, mtim: bigint, ctim: bigint): number {
+        try {
+            const path = this.#resolvePathFromFd(fd, path_ptr, path_len);
+            if (!path) return WASI_ERRNO.ENOTDIR;
+            this.#client.call<FileSystemReadWriteComponent>("party.openv.filesystem.write.settimes", path, Number(atim), Number(mtim), Number(ctim));
+            return WASI_ERRNO.ESUCCESS;
+        } catch (e) {
+            console.error("Error in path_filestat_set_times:", e);
+            return WASI_ERRNO.ENOENT;
+        }
+    }
+
+    poll_oneoff(...args: unknown[]): number {
+        console.debug("call to unimplemented poll_oneoff(", ...args, ")");
+        return WASI_ERRNO.ENOSYS;
+    }
+
+    path_readlink(dir_fd: number, path_ptr: number, path_len: number, buf_ptr: number, buf_len: number, bufused_ptr: number): number {
+        try {            
+            const path = this.#resolvePathFromFd(dir_fd, path_ptr, path_len);
+            if (!path) return WASI_ERRNO.ENOTDIR;
+            const target = this.#client.call<FileSystemReadOnlyComponent>("party.openv.filesystem.read.readlink", path) as string;
+            const view = new DataView(this.#getmemory().buffer);
+            const bytesWritten = this.#writeString(view, target, buf_ptr);
+            view.setUint32(bufused_ptr, bytesWritten, true);
+            return WASI_ERRNO.ESUCCESS;
+        } catch (e) {
+            console.error("Error in path_readlink:", e);
+            return WASI_ERRNO.ENOENT;
+        }
+    }
+
     proc_exit(code: number)  {
         this.#client.call<ProcessLocalComponent>("party.openv.process.local.exit", code);
+    }
+
+    random_get(buf_ptr: number, buf_len: number): number {
+        try {
+            const buffer = new Uint8Array(this.#getmemory().buffer, buf_ptr, buf_len);
+            crypto.getRandomValues(buffer);
+            return WASI_ERRNO.ESUCCESS;
+        } catch (e) {
+            console.error("Error in random_get:", e);
+            return WASI_ERRNO.EIO;
+        }
+    }
+    
+    sched_yield(): number {
+       if ("scheduler" in globalThis && "yield" in (globalThis as any).scheduler) {
+            globalThis.scheduler.yield();
+            return WASI_ERRNO.ESUCCESS;
+       } else {
+            console.warn("sched_yield called but scheduler.yield is not available");
+            return WASI_ERRNO.ENOSYS;
+       }
     }
 
     #writeString(memory: DataView, value: string, offset: number): number {
@@ -539,6 +699,20 @@ export class WasiRuntime {
         }
     }
 
+    #toWasiErrno(error: unknown, fallback: number): number {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("ESPIPE")) return WASI_ERRNO.ESPIPE;
+        if (message.includes("EBADF")) return WASI_ERRNO.EBADF;
+        if (message.includes("EINVAL")) return WASI_ERRNO.EINVAL;
+        if (message.includes("ENOENT")) return WASI_ERRNO.ENOENT;
+        if (message.includes("ENOTDIR")) return WASI_ERRNO.ENOTDIR;
+        if (message.includes("EEXIST")) return WASI_ERRNO.EEXIST;
+        if (message.includes("EACCES")) return WASI_ERRNO.EACCES;
+        if (message.includes("EPERM")) return WASI_ERRNO.EPERM;
+        if (message.includes("ENOSYS")) return WASI_ERRNO.ENOSYS;
+        return fallback;
+    }
+
     toImportObject(): WebAssembly.ModuleImports {
         const args_get = this.args_get.bind(this);
         const args_sizes_get = this.args_sizes_get.bind(this);
@@ -548,11 +722,16 @@ export class WasiRuntime {
         const clock_time_get = this.clock_time_get.bind(this);
         const fd_advice = this.fd_advice.bind(this);
         const fd_read = this.fd_read.bind(this);
+        const fd_readdir = this.fd_readdir.bind(this);
+        const fd_renumber = this.fd_renumber.bind(this);
+        const fd_sync = this.fd_sync.bind(this);
         const fd_close = this.fd_close.bind(this);
         const fd_seek = this.fd_seek.bind(this);
         const fd_tell = this.fd_tell.bind(this);
         const fd_fdstat_get = this.fd_fdstat_get.bind(this);
+        const fd_fdstat_set_flags = this.fd_fdstat_set_flags.bind(this);
         const fd_filestat_get = this.fd_filestat_get.bind(this);
+        const fd_filestat_set_size = this.fd_filestat_set_size.bind(this);
         const fd_prestat_get = this.fd_prestat_get.bind(this);
         const fd_prestat_dir_name = this.fd_prestat_dir_name.bind(this);
         const path_open = this.path_open.bind(this);
@@ -560,9 +739,18 @@ export class WasiRuntime {
         const path_unlink_file = this.path_unlink_file.bind(this);
         const path_remove_directory = this.path_remove_directory.bind(this);
         const path_filestat_get = this.path_filestat_get.bind(this);
+        const path_filestat_set_times = this.path_filestat_set_times.bind(this);
         const fd_write = this.fd_write.bind(this);
+        const poll_oneoff = this.poll_oneoff.bind(this);
         const proc_exit = this.proc_exit.bind(this);
-        return {
+        const random_get = this.random_get.bind(this);
+        // faking hard links since we dont have them right now
+        const path_link = this.path_symlink.bind(this);
+        const path_symlink = this.path_symlink.bind(this);
+        const path_readlink = this.path_readlink.bind(this);
+        const path_rename = this.path_rename.bind(this);
+        const sched_yield = this.sched_yield.bind(this);
+        const base = {
             args_get,
             args_sizes_get,
             environ_get,
@@ -571,11 +759,16 @@ export class WasiRuntime {
             clock_time_get,
             fd_advice,
             fd_read,
+            fd_readdir,
+            fd_renumber,
+            fd_sync,
             fd_close,
             fd_seek,
             fd_tell,
             fd_fdstat_get,
+            fd_fdstat_set_flags,
             fd_filestat_get,
+            fd_filestat_set_size,
             fd_prestat_get,
             fd_prestat_dir_name,
             path_open,
@@ -583,9 +776,30 @@ export class WasiRuntime {
             path_unlink_file,
             path_remove_directory,
             path_filestat_get,
+            path_filestat_set_times,
             fd_write,
+            poll_oneoff,
             proc_exit,
+            random_get,
+            path_link,
+            path_readlink,
+            path_symlink,
+            path_rename,
+            sched_yield,
         };
+        if (!this.#traceImports) {
+            return base;
+        }
+        return new Proxy(base, {
+            get: (target, prop, receiver) => {
+                const v = Reflect.get(target, prop, receiver);
+                if (typeof prop !== "string" || typeof v !== "function") return v;
+                return (...args: unknown[]) => {
+                    console.debug(`[wasi:${prop}]`, ...args);
+                    return (v as (...inner: unknown[]) => unknown)(...args);
+                };
+            },
+        });
     }
 
 }

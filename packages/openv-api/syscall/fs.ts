@@ -139,6 +139,10 @@ export interface FileSystemReadWriteComponent extends SystemComponent<FS_WRITE_N
     ["party.openv.filesystem.write.symlink"](target: string, path: string, mode?: FileMode): Promise<void>;
     ["party.openv.filesystem.write.chmod"](path: string, mode: FileMode): Promise<void>;
     ["party.openv.filesystem.write.chown"](path: string, uid: number, gid: number): Promise<void>;
+    ["party.openv.filesystem.write.truncate"](path: string, length: number): Promise<void>;
+    ["party.openv.filesystem.write.ftruncate"](fd: number, length: number): Promise<void>;
+    ["party.openv.filesystem.write.settimes"](path: string, atim: number, mtim: number, ctim: number): Promise<void>;
+    ["party.openv.filesystem.write.lsettimes"](path: string, atim: number, mtim: number, ctim: number): Promise<void>;
 
     // FUTURE: extended permissions management
 }
@@ -277,6 +281,10 @@ export interface FileSystemVirtualComponent extends SystemComponent<FS_VIRTUAL_N
     ["party.openv.filesystem.virtual.onsymlink"]?(id: string, handler: (target: string, path: string, mode?: FileMode) => Promise<void>): Promise<void>;
     ["party.openv.filesystem.virtual.onchmod"]?(id: string, handler: (path: string, mode: FileMode) => Promise<void>): Promise<void>;
     ["party.openv.filesystem.virtual.onchown"]?(id: string, handler: (path: string, uid: number, gid: number) => Promise<void>): Promise<void>;
+    ["party.openv.filesystem.virtual.ontruncate"]?(id: string, handler: (path: string, length: number) => Promise<void>): Promise<void>;
+    ["party.openv.filesystem.virtual.onftruncate"]?(id: string, handler: (ofd: number, length: number) => Promise<void>): Promise<void>;
+    ["party.openv.filesystem.virtual.onsettimes"]?(id: string, handler: (path: string, atim: number, mtim: number, ctim: number) => Promise<void>): Promise<void>;
+    ["party.openv.filesystem.virtual.onlsettimes"]?(id: string, handler: (path: string, atim: number, mtim: number, ctim: number) => Promise<void>): Promise<void>;
     ["party.openv.filesystem.virtual.onwatch"](id: string, handler: (path: string, options?: { recursive?: boolean }) => Promise<{
         events: AsyncIterable<FileSystemEvent>;
         abort: () => Promise<void>;

@@ -300,7 +300,6 @@ while (true) {
     continue;
   }
   buffer += ch;
-  await writeOut(ch);
 }
 `;
 }
@@ -470,9 +469,44 @@ term.onTerminalReady = async () => {
 
   addEventListener("beforeunload", onBeforeUnload);
 
+  let localEchoEnabled = true;
+  let localEchoWindowSize = true;
+  const syncEchoFromTty = async (): Promise<void> => {
+    if (!alive || !stdio) return;
+    try {
+      const mode = await openv.system["party.openv.filesystem.ioctl.ioctl"](
+        stdio.stdin,
+        "tty.getMode"
+      ) as { echo?: boolean };
+      if (typeof mode?.echo === "boolean") {
+        localEchoEnabled = mode.echo;
+      }
+    } catch {
+      // Keep fallback local echo behavior if tty mode ioctl is unavailable.
+    }
+  };
+  const shouldLocallyEchoInput = (input: string): boolean => {
+    if (!localEchoEnabled || !alive || !stdio) return false;
+    // Do not locally echo escape/control sequences besides backspace and newline.
+    if (input.includes("\u001b")) return false;
+    if (/[\x00-\x07\x0B-\x0C\x0E-\x1F]/.test(input)) return false;
+    return true;
+  };
+
+  const echoInputLocally = (input: string): void => {
+    if (!shouldLocallyEchoInput(input)) return;
+    const normalized = input
+      .replace(/\r\n|\r|\n/g, "\r\n")
+      .replace(/\x7f|\x08/g, "\b \b");
+    io.print(normalized);
+  };
+
   const writeStdin = async (input: string): Promise<void> => {
     if (!alive || !stdio) return;
-    const bytes = encoder.encode(input);
+    echoInputLocally(input);
+    globalThis.lineEnding ||= "\n";
+    const normalized = input.replace(/\r\n|\r|\n/g, globalThis.lineEnding);
+    const bytes = encoder.encode(normalized);
     await openv.system["party.openv.filesystem.write.write"](stdio.stdin, bytes);
   };
 
@@ -485,16 +519,18 @@ term.onTerminalReady = async () => {
   let windowResizeIoctlSupported = true;
   io.onTerminalResize = (cols: number, rows: number) => {
     if (!alive || !stdio) return;
-    if (!windowResizeIoctlSupported) return;
+    if (!windowResizeIoctlSupported && !localEchoWindowSize) return;
     void openv.system["party.openv.filesystem.ioctl.ioctl"](
       stdio.stdin,
       "tty.setWindowSize",
       { cols, rows }
     ).catch(() => {
       windowResizeIoctlSupported = false;
+      localEchoWindowSize = false;
     });
   };
   io.onTerminalResize(term.screenSize.width, term.screenSize.height);
+  void syncEchoFromTty();
 
   const readLoop = async (fd: number): Promise<void> => {
     while (alive) {

@@ -127,6 +127,19 @@ export class DevFS implements FileSystemDevFsComponent {
         await system["party.openv.filesystem.virtual.onunlink"](DEVFS_NAMESPACE, async (path: string) => {
             throw new Error(`EPERM: cannot unlink device files in devfs through fs ops: '${path}'`);
         });
+        await system["party.openv.filesystem.virtual.ontruncate"]?.(DEVFS_NAMESPACE, async (path: string, _length: number) => {
+            throw new Error(`EPERM: cannot truncate device files in devfs: '${path}'`);
+        });
+        await system["party.openv.filesystem.virtual.onftruncate"]?.(DEVFS_NAMESPACE, async (ofd: number, _length: number) => {
+            await this.#assertOpenFile(ofd, "ftruncate");
+            throw new Error(`EPERM: cannot truncate device files in devfs (ofd ${ofd})`);
+        });
+        await system["party.openv.filesystem.virtual.onsettimes"]?.(DEVFS_NAMESPACE, async (path: string, _atim: number, _mtim: number, _ctim: number) => {
+            throw new Error(`EPERM: cannot change timestamps in devfs: '${path}'`);
+        });
+        await system["party.openv.filesystem.virtual.onlsettimes"]?.(DEVFS_NAMESPACE, async (path: string, _atim: number, _mtim: number, _ctim: number) => {
+            throw new Error(`EPERM: cannot change link timestamps in devfs: '${path}'`);
+        });
     }
 
     async mount(path: string): Promise<void> {
@@ -250,6 +263,12 @@ export class DevFS implements FileSystemDevFsComponent {
             throw new Error(`ENOENT: device for open file number ${ofd} no longer exists`);
         }
         return device;
+    }
+
+    async #assertOpenFile(ofd: number, op: string): Promise<void> {
+        if (!this.#openFiles.has(ofd)) {
+            throw new Error(`EBADF: invalid open file number ${ofd} for ${op}`);
+        }
     }
 
     async ["party.openv.filesystem.devfs.register"](path: string, device: CharacterDeviceInfo): Promise<void> {
